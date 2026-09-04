@@ -1,0 +1,226 @@
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage[margin=1in]{geometry}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.6\baselineskip}
+
+\definecolor{pyblockgreen}{RGB}{0,150,60}
+
+\title{\vspace{-1.2cm}\textbf{\color{pyblockgreen}CHIRP}\\[2pt]
+\large Coinbase Hashrate-Indexed Reward Payouts\\[4pt]
+\normalsize Pagos de recompensa indexados por hashrate, en la coinbase\\[2pt]
+\small Un esquema de recompensa compartida, no-custodial y por loter\'ia ponderada, para miner\'ia Bitcoin}
+\author{\textit{Libro Blanco de PyBLOCK}}
+\date{v1.0 --- Junio 2026}
+
+\begin{document}
+\maketitle
+
+\begin{quote}\itshape
+``Sin power no gener\'as la onda gravitacional, y sin tiempo no hay espacio-tiempo.''\\
+\normalfont Una onda gravitacional necesita una fuente energ\'etica \emph{y} espacio-tiempo por
+donde viajar. CHIRP te pide exactamente las mismas dos cosas: \textbf{potencia} y \textbf{tiempo}.
+\end{quote}
+
+\section*{Resumen}
+CHIRP es un esquema de recompensa para pools de miner\'ia Bitcoin en el que la \textbf{propia
+transacci\'on coinbase} de un bloque encontrado paga directamente a un conjunto de mineros
+contribuyentes --- de forma at\'omica, en cadena, y \textbf{sin que el pool retenga jam\'as un solo
+satoshi de las ganancias de nadie}. Como la coinbase admite s\'olo un n\'umero finito de salidas,
+CHIRP llena esos cupos con una \textbf{loter\'ia ponderada verificable} cuyos boletos se ganan con
+dos cosas a la vez: \textbf{antig\"uedad} (cu\'anto hace que min\'as con PyBLOCK) y \textbf{potencia}
+(el trabajo que aportaste en una ventana rodante). A lo largo de muchos bloques, la ganancia
+esperada de un minero converge a su peso; en cada bloque, qui\'en cobra es un sorteo p\'ublicamente
+auditable sembrado por el hash del bloque anterior.
+
+\section{El dilema de toda pool chica}
+Una pool compartida s\'olo puede pagar a sus miembros \textbf{cuando encuentra un bloque}. La
+alternativa --- FPPS, pagar por share sin importar la suerte --- obliga al operador a \textbf{adelantar
+cada pago de sus reservas} y absorber toda la varianza, lo que es quiebra asegurada para cualquiera
+sin hashrate a escala industrial.
+
+El esquema honesto a escala chica es entonces alguna forma de pago-por-\'ultimos-$N$-shares: pagos
+raros, grandes y repartidos con justicia. Pero el PPLNS habitual tiene un segundo problema:
+\textbf{la custodia}. La recompensa cae en la billetera del operador, y \'el la reparte. CHIRP
+elimina por completo el problema de la custodia.
+
+\section{Estado del arte}
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{PPS / FPPS} --- pago predecible, adelantado por el operador, varianza sobre el
+  operador. Requiere escala y reservas.
+  \item \textbf{PPLNS} --- pago sobre una ventana de shares recientes. Justo, pero normalmente
+  custodial.
+  \item \textbf{TIDES de OCEAN} --- una variante de PPLNS sobre una ventana rodante de los \'ultimos
+  8 bloques ($8 \times D_{\text{red}}$ de share-work) que paga a cada minero directo en la coinbase
+  --- no-custodial y auditable. TIDES es el antecedente m\'as cercano y la inspiraci\'on de CHIRP.
+\end{itemize}
+
+\section{CHIRP en una frase}
+\begin{quote}
+Cuando el pool resuelve un bloque, su coinbase paga a una muestra por loter\'ia ponderada de mineros
+elegibles, directo en cadena, donde las probabilidades y la tajada de cada uno son el promedio de
+cu\'anto hace que mina ac\'a (\textbf{d\'ias}) y cu\'anto trabajo aport\'o \'ultimamente (\textbf{power}).
+\end{quote}
+
+\section{La mec\'anica}
+
+\subsection{Elegibilidad --- el filtro de candidatura}
+Un minero es \emph{aspirante} s\'olo si cumple \emph{ambos} m\'inimos:
+\[
+  \text{candidato} \iff \big( \text{d\'ias}_i \ge \text{MIN\_D\'IAS} \big) \;\wedge\;
+  \big( \text{power}_i \ge \text{MIN\_POWER} \big).
+\]
+\textsc{min\_power} elimina el polvo (dust); \textsc{min\_d\'ias} fija un piso de lealtad. \emph{Quien
+no cumple, no es aspirante}: una CPU ``conectada por a\~nos'' nunca alcanza \textsc{min\_power}, y un
+ballen\'on que aterriza de golpe nunca alcanza \textsc{min\_d\'ias}.
+
+\subsection{Peso --- la media de ambas}
+Entre los candidatos, el peso de cada minero es el \textbf{promedio} de dos factores normalizados:
+\[
+  w_i \;=\; \frac{\,d_i + p_i\,}{2},
+  \qquad
+  d_i = \min\!\Big(\frac{\text{d\'ias}_i}{\text{DAYS\_FULL}},\, 1\Big),
+  \qquad
+  p_i = \min\!\Big(\frac{\text{power}_i}{\text{POWER\_FULL}},\, 1\Big).
+\]
+La media --- ni producto, ni suma --- es deliberada: \textbf{balancea} las entradas para que ninguna
+domine sola. Un veterano con una m\'aquina d\'ebil se hunde por $p_i$ bajo; un gigante reci\'en
+llegado se hunde por $d_i$ bajo. Para ganar necesit\'as \textbf{las dos}. Aqu\'i $\text{power}_i$ es
+el share-work acumulado del minero (la suma de las \textbf{dificultades} de sus shares --- por
+altura, no por cantidad) dentro de la ventana rodante.
+
+\subsection{La loter\'ia --- llenar los cupos de la coinbase}
+La coinbase admite a lo sumo $\text{MAX\_N}$ salidas antes de competir por peso de bloque con las
+transacciones que pagan comisi\'on. Cuando hay m\'as candidatos que cupos, CHIRP \textbf{sortea}
+ganadores con probabilidad proporcional al peso, con el m\'etodo de reservorio ponderado de
+Efraimidis--Spirakis:
+\[
+  \text{semilla} = \text{hashBloquePrevio}_{64},
+  \qquad
+  \text{clave}_i = u_i^{\,1/w_i},
+  \qquad
+  u_i = U(\text{semilla}, \text{addr}_i) \in (0,1),
+\]
+\[
+  \text{ganadores} = \text{las } \textsc{max\_n} \text{ direcciones con mayor } \text{clave}_i .
+\]
+Los uniformes $u_i$ se derivan de forma determinista de la semilla y la direcci\'on del minero. La
+semilla es el \textbf{hash del bloque anterior}: desconocido cuando los mineros empezaron a aportar
+(no se puede amañar), pero totalmente reproducible despu\'es (cualquiera audita el sorteo).
+\textbf{As\'i, el l\'imite de tama\~no de la coinbase deja de ser una restricci\'on y se vuelve la
+mec\'anica} --- una loter\'ia justa y recurrente por los cupos.
+
+\subsection{Pago --- el reparto entre ganadores}
+La recompensa, menos la comisi\'on del pool, se divide entre los ganadores en proporci\'on al peso:
+\[
+  \text{pago}_i \;=\; \big(R - \text{fee}\big)\cdot
+  \frac{w_i}{\displaystyle\sum_{j \in \mathcal{W}} w_j},
+  \qquad
+  R = \text{subsidio} + \text{comisiones}.
+\]
+Cada pago es una salida \texttt{TxOut} de la coinbase. Si cualquier minero resuelve el bloque, es la
+\emph{red} la que paga a todos a la vez --- sin saldos, sin retiros, sin custodia.
+
+\subsection{La ventana --- una variante acotada de TIDES}
+\textsc{power} se mide sobre una ventana rodante de share-work reciente. TIDES usa una ventana de
+$8 \times D_{\text{red}}$; al hashrate de una pool chica eso abarcar\'ia millones de a\~nos y nunca
+deslizar\'ia. CHIRP por eso la acota:
+\[
+  \text{ventana} \;=\; \min\!\big(\,8 \times D_{\text{red}},\; 24\text{h}\,\big).
+\]
+Converge a TIDES a escala exahash y se mantiene significativa y justa para los mineros activos hoy.
+Como el share-work es $\text{hashrate} \times \text{tiempo}$, la ventana ya premia el aporte y la
+presencia reciente; el promedio expl\'icito de d\'ias/power le agrega la antig\"uedad encima.
+
+\section{El principio de la onda gravitacional}
+CHIRP se llama as\'i por el \textbf{chirp} --- la se\~nal ascendente que LIGO detecta cuando dos
+agujeros negros giran uno sobre el otro y colisionan, radiando ondulaciones por el espacio-tiempo.
+La met\'afora es exacta, y es tambi\'en el primer principio del dise\~no:
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{Sin potencia no hay onda.} Las ondas gravitacionales las radia masa-energ\'ia
+  acelerando. Sin fuente $\Rightarrow$ sin se\~nal. Sin hashrate real $\Rightarrow$ sin peso CHIRP.
+  \item \textbf{Sin tiempo no hay espacio-tiempo.} La onda es una ondulaci\'on del \emph{espacio-tiempo};
+  quit\'a la dimensi\'on temporal y no hay medio que ondular. Sin antig\"uedad $\Rightarrow$ sin peso.
+\end{itemize}
+El requisito doble no es arbitrario --- es \textbf{cosmol\'ogico}. Los mineros \emph{fusionan} su
+hashrate como agujeros negros colisionando, y cuando cae el bloque la recompensa \textbf{``chirpea''}
+hacia afuera como una onda que paga a cada contribuyente. (Ocean $\to$ TIDES, mareas de agua.
+Gravedad $\to$ CHIRP, ondas del espacio-tiempo.)
+
+\section{Verificabilidad y transparencia}
+CHIRP es auditable de punta a punta: los \textbf{pesos} se computan de entradas p\'ublicas (el
+timestamp de primera aparici\'on y el share-work rodante de cada direcci\'on) y se publican; \textbf{el
+sorteo} es determinista dado el hash del bloque anterior, as\'i que cualquiera lo replica y confirma
+sus probabilidades; \textbf{el reparto} es visible directo en la coinbase de cada bloque encontrado.
+No confíes --- verific\'a.
+
+\section{Anti-trampa}
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Ataque} & \textbf{Por qu\'e falla} \\
+\midrule
+Sybil (dividir en direcciones nuevas) & cada direcci\'on nueva arranca en 0 d\'ias $\rightarrow$ bajo \textsc{min\_d\'ias} \\
+Lealtad ociosa (una CPU por a\~nos) & nunca alcanza \textsc{min\_power}; la media hunde el power bajo \\
+Ballena paraca\'idas (power, sin antig.) & nunca alcanza \textsc{min\_d\'ias}; $d_i = 0$ hunde la media \\
+Salto en el borde de la ventana & atenuado por el suavizado de 24h y la aleatoriedad del sorteo \\
+Predecir el sorteo & la semilla es el hash del bloque \emph{anterior} --- desconocido hasta que existe \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Par\'ametros (defaults v1, ajustables)}
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Par\'ametro} & \textbf{Default} & \textbf{Rol} \\
+\midrule
+\textsc{min\_d\'ias}  & 7 d\'ias & piso de lealtad para candidatura \\
+\textsc{min\_power}  & $\approx 10$ shares a min-dificultad & piso anti-dust para candidatura \\
+\textsc{days\_full}  & 30 d\'ias & antig\"uedad a la que $d_i$ satura \\
+\textsc{power\_full} & calibrado a un ASIC sano / 24h & work al que $p_i$ satura \\
+\textsc{max\_n}      & 100 & cupos de coinbase = ganadores del sorteo \\
+Ventana              & $\min(8 D_{\text{red}}, 24\text{h})$ & ventana rodante de power \\
+Fee                  & 0.9\% & comisi\'on de PyBLOCK en la coinbase \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Despliegue}
+CHIRP corre como una instancia dedicada de pool Stratum V2 en el puerto \textbf{5554}, junto a (y
+totalmente independiente de) el stratum solo/loter\'ia de PyBLOCK en el 5555. Ambos sirven las
+plantillas \textbf{BIP-110} propias de PyBLOCK desde el mismo nodo Bitcoin Knots, as\'i que cada
+bloque CHIRP tambi\'en se\~naliza BIP-110. Un registro de estad\'isticas por direcci\'on, actualizado
+con cada share aceptado y persistido a disco, provee la antig\"uedad y el power que se vuelven el peso
+de cada minero.
+
+\section{L\'imites y honestidad}
+\textbf{La varianza es real.} Una pool chica encuentra bloques rara vez; CHIRP suaviza \emph{qui\'en
+comparte} un bloque, no \emph{cada cu\'anto} llegan los bloques. Es un sindicato, no un sueldo --- los
+mineros que quieren ingreso estable deben minar DATUM $\to$ OCEAN, que PyBLOCK tambi\'en ofrece.
+\textsc{power\_full} y \textsc{min\_power} requieren calibraci\'on contra el hashrate real.
+
+\section{Conclusi\'on}
+CHIRP convierte tres restricciones en virtudes. El \emph{problema de custodia} se vuelve
+\textbf{no-custodia} --- la red paga a los mineros directo en la coinbase. El \emph{l\'imite de tama\~no
+de la coinbase} se vuelve una \textbf{loter\'ia justa y verificable} por los cupos. Y la \emph{varianza
+de pool chica} se vuelve el \textbf{alma honesta del producto} --- un sindicato que, por la misma
+l\'ogica que el cosmos, paga a quienes traen tanto energ\'ia como tiempo.
+
+\begin{center}\itshape
+Min\'a en PyBLOCK. Fusion\'a tu hashrate. Escuch\'a el chirp. \quad $\bigstar$
+\end{center}
+
+\vfill
+\begin{center}\small
+\textit{PyBLOCK --- La pool Bitcoin de los CypherPunks. Impulsada por Bitcoin Knots $\cdot$ BIP-110 aplicado.}
+\end{center}
+
+\end{document}

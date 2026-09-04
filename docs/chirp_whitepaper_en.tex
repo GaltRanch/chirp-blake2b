@@ -1,0 +1,219 @@
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage[margin=1in]{geometry}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.6\baselineskip}
+
+\definecolor{pyblockgreen}{RGB}{0,150,60}
+\definecolor{pyblockdark}{RGB}{20,20,20}
+
+\title{\vspace{-1.2cm}\textbf{\color{pyblockgreen}CHIRP}\\[2pt]
+\large Coinbase Hashrate-Indexed Reward Payouts\\[4pt]
+\normalsize A non-custodial, weighted-lottery shared-reward scheme for Bitcoin mining}
+\author{\textit{A PyBLOCK White Paper}}
+\date{v1.0 --- June 2026}
+
+\begin{document}
+\maketitle
+
+\begin{quote}\itshape
+``Without power there is no gravitational wave, and without time there is no spacetime.''\\
+\normalfont A gravitational wave needs an energetic source \emph{and} spacetime to travel through.
+CHIRP needs the same two things from you: \textbf{power} and \textbf{time}.
+\end{quote}
+
+\section*{Abstract}
+CHIRP is a Bitcoin mining-pool reward scheme in which a found block's \textbf{coinbase transaction
+itself} pays a set of contributing miners directly --- atomically, on-chain, and \textbf{without
+the pool ever holding a single satoshi of anyone's earnings}. Because the coinbase output limit
+admits only finitely many recipients, CHIRP fills those slots with a \textbf{verifiable weighted
+lottery} whose tickets are earned by two things at once: \textbf{tenure} (how long you have mined
+with PyBLOCK) and \textbf{power} (the work you have contributed in a rolling window). Over many
+blocks, a miner's expected earnings converge to their weight; in any single block, who gets paid is
+a publicly auditable draw seeded by the previous block hash.
+
+\section{The dilemma every small pool faces}
+A shared mining pool can only ever pay its members \textbf{when it finds a block}. The alternative
+--- FPPS, paying per share regardless of luck --- forces the operator to \textbf{front every payout
+from reserves} and absorb all variance, which is bankruptcy waiting to happen for anyone without
+warehouse-scale hashrate.
+
+The honest scheme at small scale is therefore some form of pay-per-last-$N$-shares: rare, large,
+fairly-split payouts. But PPLNS as usually deployed has a second problem --- \textbf{custody}. The
+block reward lands in the operator's wallet, and the operator then distributes it. CHIRP removes
+the custody problem entirely.
+
+\section{Prior art}
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{PPS / FPPS} --- predictable pay, operator-fronted, variance on the operator. Needs
+  scale and reserves.
+  \item \textbf{PPLNS} --- pay over a window of recent shares. Fair, but typically custodial.
+  \item \textbf{OCEAN's TIDES} --- a PPLNS variant over a rolling window of the last 8 blocks
+  ($8 \times D_{\text{net}}$ of share-work) that pays each miner directly in the coinbase ---
+  non-custodial and auditable. TIDES is the closest prior art and the inspiration for CHIRP.
+\end{itemize}
+
+\section{CHIRP in one sentence}
+\begin{quote}
+When the pool solves a block, its coinbase pays a weighted-lottery sample of eligible miners
+directly on-chain, where each miner's odds and slice are the average of how long they have mined
+here (\textbf{days}) and how much work they have recently contributed (\textbf{power}).
+\end{quote}
+
+\section{The mechanism}
+
+\subsection{Eligibility --- the candidacy gate}
+A miner is an \emph{aspirant} only if they clear \emph{both} floors:
+\[
+  \text{candidate} \iff \big( \text{days}_i \ge \text{MIN\_DAYS} \big) \;\wedge\;
+  \big( \text{power}_i \ge \text{MIN\_POWER} \big).
+\]
+\textsc{min\_power} eliminates dust; \textsc{min\_days} sets a loyalty floor. \emph{Whoever fails
+either floor is not an aspirant}: a CPU idling ``connected for years'' never clears \textsc{min\_power}, and a whale
+that parachutes in never clears \textsc{min\_days}.
+
+\subsection{Weight --- the average of both}
+Among candidates, each miner's weight is the \textbf{mean} of two normalized factors:
+\[
+  w_i \;=\; \frac{\,d_i + p_i\,}{2},
+  \qquad
+  d_i = \min\!\Big(\frac{\text{days}_i}{\text{DAYS\_FULL}},\, 1\Big),
+  \qquad
+  p_i = \min\!\Big(\frac{\text{power}_i}{\text{POWER\_FULL}},\, 1\Big).
+\]
+The mean --- not a product, not a sum --- is deliberate: it \textbf{balances} the inputs so neither
+alone dominates. A veteran with a weak machine is dragged down by low $p_i$; a freshly-joined giant
+is dragged down by low $d_i$. To win you need \textbf{both}. Here $\text{power}_i$ is the miner's
+accumulated share-work (the sum of share difficulties) inside the rolling window.
+
+\subsection{The lottery --- filling the coinbase slots}
+A coinbase can carry only $\text{MAX\_N}$ outputs before competing with fee-paying transactions for
+block weight. When candidates exceed slots, CHIRP \textbf{draws} winners with probability
+proportional to weight, using the Efraimidis--Spirakis weighted-reservoir method:
+\[
+  \text{seed} = \text{prevBlockHash}_{64},
+  \qquad
+  \text{key}_i = u_i^{\,1/w_i},
+  \qquad
+  u_i = U(\text{seed}, \text{addr}_i) \in (0,1),
+\]
+\[
+  \text{winners} = \operatorname*{top\text{-}MAX\_N}_{i}\; \text{key}_i .
+\]
+The uniforms $u_i$ are derived deterministically from the seed and the miner's address. The seed is
+the \textbf{previous block hash}: unknown when miners began contributing (so it cannot be gamed),
+yet fully reproducible afterward (so anyone can audit the draw). \textbf{The coinbase-size constraint
+thus becomes the mechanism} --- a fair, recurring lottery for the slots.
+
+\subsection{Payout --- the split among winners}
+The reward, less the pool fee, is divided across winners in proportion to weight:
+\[
+  \text{payout}_i \;=\; \big(R - \text{fee}\big)\cdot
+  \frac{w_i}{\displaystyle\sum_{j \in \mathcal{W}} w_j},
+  \qquad
+  R = \text{subsidy} + \text{tx fees}.
+\]
+Every payout is a coinbase \texttt{TxOut}. If any miner solves the block, the \emph{network} pays
+everyone at once --- no balances, no withdrawals, no custody.
+
+\subsection{The window --- a bounded variant of TIDES}
+\textsc{power} is measured over a rolling window of recent share-work. TIDES uses an
+$8 \times D_{\text{net}}$ window; at a small pool's hashrate that would span millions of years and
+never slide. CHIRP therefore bounds it:
+\[
+  \text{window} \;=\; \min\!\big(\,8 \times D_{\text{net}},\; 24\text{h}\,\big).
+\]
+This converges to TIDES at exahash scale while staying meaningful and fair for active miners today.
+Because share-work is $\text{hashrate} \times \text{time}$, the window already rewards both
+contribution and recent presence; the explicit days/power average layers tenure on top.
+
+\section{The gravitational-wave principle}
+CHIRP is named for the \textbf{chirp} --- the rising signal LIGO detects when two black holes spiral
+together and merge, radiating ripples through spacetime. The metaphor is exact, and it is also the
+design's first principle:
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{Without power, there is no wave.} Gravitational waves are radiated by accelerating
+  mass-energy. No source $\Rightarrow$ no signal. No real hashrate $\Rightarrow$ no CHIRP weight.
+  \item \textbf{Without time, there is no spacetime.} The wave is a ripple of \emph{space-time};
+  remove the temporal dimension and there is no medium to ripple. No tenure $\Rightarrow$ no weight.
+\end{itemize}
+The dual requirement is not arbitrary --- it is \textbf{cosmological}. Miners \emph{merge} their
+hashrate like colliding black holes, and when the block is found the reward \textbf{chirps} out as a
+wave that pays every contributor. (Ocean $\to$ TIDES, tides of water. Gravity $\to$ CHIRP, ripples
+of spacetime.)
+
+\section{Verifiability \& transparency}
+CHIRP is auditable end to end: \textbf{weights} are computed from public inputs (each address's
+first-seen timestamp and rolling share-work) and published; \textbf{the draw} is deterministic given
+the previous block hash, so anyone can replay it and confirm their odds; \textbf{the split} is
+visible directly in the coinbase of every block found. Don't trust --- verify.
+
+\section{Anti-gaming}
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Attack} & \textbf{Why it fails} \\
+\midrule
+Sybil (split across new addresses) & each new address starts at 0 days $\rightarrow$ below \textsc{min\_days} \\
+Idle loyalty (a CPU for years) & never clears \textsc{min\_power}; the average sinks low power \\
+Whale parachute (power, no tenure) & never clears \textsc{min\_days}; $d_i = 0$ sinks the average \\
+Window-boundary hopping & muted by 24h smoothing and the lottery randomness \\
+Predicting the draw & the seed is the \emph{previous} block hash --- unknown until it exists \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Parameters (v1 defaults, tunable)}
+\begin{center}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Parameter} & \textbf{Default} & \textbf{Role} \\
+\midrule
+\textsc{min\_days}   & 7 days & loyalty floor for candidacy \\
+\textsc{min\_power}  & $\approx 10$ shares at min-difficulty & dust floor for candidacy \\
+\textsc{days\_full}  & 30 days & tenure at which $d_i$ saturates \\
+\textsc{power\_full} & calibrated to a healthy ASIC / 24h & work at which $p_i$ saturates \\
+\textsc{max\_n}      & 100 & coinbase slots = lottery winners \\
+Window               & $\min(8 D_{\text{net}}, 24\text{h})$ & rolling power window \\
+Fee                  & 0.9\% & PyBLOCK's coinbase cut \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Deployment}
+CHIRP runs as a dedicated Stratum V2 pool instance on port \textbf{5554}, alongside (and entirely
+independent of) PyBLOCK's solo/lottery stratum on 5555. Both serve PyBLOCK's own \textbf{BIP-110}
+templates from the same Bitcoin Knots node, so every CHIRP block also signals BIP-110. A per-address
+stats registry, updated on every accepted share and snapshotted to disk, supplies the tenure and
+power that become each miner's weight.
+
+\section{Limitations \& honesty}
+\textbf{Variance is real.} A small pool finds blocks rarely; CHIRP smooths \emph{who shares} a
+block, not \emph{how often} blocks arrive. It is a syndicate, not a salary --- miners who want
+steady income should mine DATUM $\to$ OCEAN, which PyBLOCK also offers. \textsc{power\_full} and
+\textsc{min\_power} require calibration against live hashrate.
+
+\section{Conclusion}
+CHIRP turns three constraints into features. The \emph{custody problem} becomes \textbf{non-custody}
+--- the network pays miners directly in the coinbase. The \emph{coinbase-size limit} becomes a
+\textbf{fair, verifiable lottery} for the slots. And the \emph{small-pool variance} becomes the
+\textbf{honest soul of the product} --- a syndicate that, by the same logic as the cosmos, pays
+those who bring both energy and time.
+
+\begin{center}\itshape
+Mine on PyBLOCK. Merge your hashrate. Hear the chirp. \quad $\bigstar$
+\end{center}
+
+\vfill
+\begin{center}\small
+\textit{PyBLOCK --- The CypherPunk's Bitcoin Mining Pool. Powered by Bitcoin Knots $\cdot$ BIP-110 enforced.}
+\end{center}
+
+\end{document}
