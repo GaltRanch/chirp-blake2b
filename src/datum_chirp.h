@@ -25,7 +25,12 @@ typedef struct {
     chirp_share_t *shares; size_t n_shares, cap_shares;
 } chirp_miner_t;
 typedef struct { chirp_miner_t *miners; size_t n, cap; } chirp_registry_t;
-typedef struct { char addr[CHIRP_ADDR_MAX]; double weight; } chirp_cand_t;
+typedef struct { char addr[CHIRP_ADDR_MAX]; double weight; double active_secs; double power; } chirp_cand_t;
+// Snapshot commitment: every CHIRP coinbase carries an OP_RETURN output "CHIRP1" || BLAKE2b-256(snapshot JSON),
+// where the snapshot is the exact registry state (eligible candidates, tenure, work, weights, params, payouts)
+// the draw was computed from. The snapshot is published; anyone can hash it, match the block, and re-run the draw.
+#define CHIRP_SNAPSHOT_TAG      "CHIRP1"
+#define CHIRP_SNAPSHOT_DIR_DFLT "/var/www/pyblock/data/chirp_snapshots"
 typedef struct { char addr[CHIRP_ADDR_MAX]; uint64_t sats; } chirp_payout_t;
 
 void   chirp_init(chirp_registry_t *r);

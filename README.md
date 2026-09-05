@@ -20,11 +20,14 @@ Hughes, MIT) ported to **Bitcoin-BLAKE2b** and extended with the CHIRP economic 
   (block-header) byte order, read little-endian — which is the **last 16 hex characters of the hash as
   displayed by `getblockhash`, parsed big-endian**: `seed = int(prevhash_hex[-16:], 16)`. Per-address
   uniform: `u = FNV-1a(seed ^ addr) → splitmix64 → (0,1]`; key = `u^(1/weight)`; top-N keys win.
-- **What "verifiable" means here, honestly** — the draw and the coinbase split are recomputable from the
-  chain, but the *inputs* (each address's active tenure and 24h work) are the pool's registry, kept
-  off-chain from the shares it received. You can check the math; you still trust the pool not to inflate
-  a friend's tenure or work. Committing a hash of the registry snapshot in each block's coinbase (and
-  publishing the snapshot) is the planned fix — see `docs/`.
+- **Snapshot commitment** — every CHIRP coinbase carries `OP_RETURN "CHIRP1" || BLAKE2b-256(snapshot)`,
+  where the snapshot is the exact registry state the draw used (eligible addresses, tenure, 24h work,
+  weight bits, parameters, seed, payouts) as canonical JSON. The pool publishes it
+  (`chirp_api.php?mode=snapshot&hash=…`); `tools/verify_chirp_block.py --height H` checks that it hashes
+  to the block's commitment, that the whitepaper weights were applied, that the draw and split reproduce
+  the payouts, and that the coinbase pays them exactly. The pool cannot rewrite tenure or work after a block
+  exists; a miner can check their own numbers in every snapshot. What still rests on the pool is the
+  registry being built honestly from shares — see `docs/design/chirp-snapshot-commitment.md`.
 - **Coinbase split** — winners are paid ∝ weight as outputs of the found block's coinbase. Pool fee
   `CHIRP_FEE_BPS` (90 = 0.9%) and sub-dust remainders go to the pool address. Nothing is custodied.
 

@@ -76,6 +76,7 @@ size_t chirp_candidates(chirp_registry_t *r, uint64_t now, double min_days, doub
         double pn = power/power_full; if(pn>1.0) pn=1.0;
         strncpy(out[k].addr,m->addr,CHIRP_ADDR_MAX-1); out[k].addr[CHIRP_ADDR_MAX-1]=0;
         out[k].weight=(dn+pn)/2.0;                                   // WP §4.2: la MEDIA equilibra — ni solo lealtad ni solo hashrate
+        out[k].active_secs=m->active_secs; out[k].power=power;      // inputs del peso → van al snapshot comprometido en el coinbase
         k++;
     }
     return k;
