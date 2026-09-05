@@ -13,7 +13,12 @@ void chirp_free(chirp_registry_t *r){
 
 static chirp_miner_t* find_or_add(chirp_registry_t *r, const char *addr, uint64_t now){
     for(size_t i=0;i<r->n;i++) if(strncmp(r->miners[i].addr,addr,CHIRP_ADDR_MAX-1)==0) return &r->miners[i];
-    if(r->n==r->cap){ r->cap = r->cap? r->cap*2 : 16; r->miners = realloc(r->miners, r->cap*sizeof(chirp_miner_t)); }
+    if(r->n==r->cap){
+        size_t ncap = r->cap? r->cap*2 : 16;
+        chirp_miner_t *nm = realloc(r->miners, ncap*sizeof(chirp_miner_t));
+        if(!nm) return NULL;   // OOM: keep the old block intact; caller must tolerate NULL
+        r->miners = nm; r->cap = ncap;
+    }
     chirp_miner_t *m=&r->miners[r->n++];
     memset(m,0,sizeof(*m));
     strncpy(m->addr,addr,CHIRP_ADDR_MAX-1);
@@ -34,10 +39,16 @@ static double window_work(chirp_miner_t *m, uint64_t now){
 
 void chirp_record_share(chirp_registry_t *r, const char *addr, double work, uint64_t now){
     chirp_miner_t *m=find_or_add(r,addr,now);
+    if(!m) return;   // OOM: drop this share rather than crash
     uint64_t gap = now>m->last_seen ? now-m->last_seen : 0;
     if(m->last_seen!=0 && gap<CHIRP_ACTIVE_GAP_CAP) m->active_secs += (double)gap;  // tenure ACTIVA (gaps offline no cuentan)
     m->last_seen=now;
-    if(m->n_shares==m->cap_shares){ m->cap_shares = m->cap_shares? m->cap_shares*2 : 32; m->shares=realloc(m->shares, m->cap_shares*sizeof(chirp_share_t)); }
+    if(m->n_shares==m->cap_shares){
+        size_t ncap = m->cap_shares? m->cap_shares*2 : 32;
+        chirp_share_t *ns = realloc(m->shares, ncap*sizeof(chirp_share_t));
+        if(!ns) return;   // OOM: drop this share, keep the registry consistent
+        m->shares = ns; m->cap_shares = ncap;
+    }
     m->shares[m->n_shares].ts=now; m->shares[m->n_shares].work=work; m->n_shares++;
 }
 

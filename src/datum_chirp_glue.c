@@ -49,7 +49,12 @@ static void chirp_load_locked(uint64_t now){
                         uint64_t ts=(uint64_t)json_integer_value(json_array_get(pair,0));
                         double wk=json_number_value(json_array_get(pair,1));
                         if(ts<cutoff) continue;
-                        if(m->n_shares==m->cap_shares){ m->cap_shares=m->cap_shares?m->cap_shares*2:32; m->shares=realloc(m->shares,m->cap_shares*sizeof(chirp_share_t)); }
+                        if(m->n_shares==m->cap_shares){
+                            size_t ncap=m->cap_shares?m->cap_shares*2:32;
+                            chirp_share_t *ns=realloc(m->shares,ncap*sizeof(chirp_share_t));
+                            if(!ns) break;   // OOM while loading the registry: keep what we have
+                            m->shares=ns; m->cap_shares=ncap;
+                        }
                         m->shares[m->n_shares].ts=ts; m->shares[m->n_shares].work=wk; m->n_shares++;
                     }
                 }

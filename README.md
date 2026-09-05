@@ -16,6 +16,15 @@ Hughes, MIT) ported to **Bitcoin-BLAKE2b** and extended with the CHIRP economic 
   env (`CHIRP_DAYS_FULL`, `CHIRP_POWER_FULL`) without recompiling.
 - **Deterministic weighted draw** — Efraimidis–Spirakis sampling without replacement, **seeded by the
   previous block hash**, up to `CHIRP_MAX_N` winners. Anyone can recompute the draw from the chain.
+  Exact seed (`src/datum_chirp_glue.c`): the first 8 bytes of the previous block hash in *internal*
+  (block-header) byte order, read little-endian — which is the **last 16 hex characters of the hash as
+  displayed by `getblockhash`, parsed big-endian**: `seed = int(prevhash_hex[-16:], 16)`. Per-address
+  uniform: `u = FNV-1a(seed ^ addr) → splitmix64 → (0,1]`; key = `u^(1/weight)`; top-N keys win.
+- **What "verifiable" means here, honestly** — the draw and the coinbase split are recomputable from the
+  chain, but the *inputs* (each address's active tenure and 24h work) are the pool's registry, kept
+  off-chain from the shares it received. You can check the math; you still trust the pool not to inflate
+  a friend's tenure or work. Committing a hash of the registry snapshot in each block's coinbase (and
+  publishing the snapshot) is the planned fix — see `docs/`.
 - **Coinbase split** — winners are paid ∝ weight as outputs of the found block's coinbase. Pool fee
   `CHIRP_FEE_BPS` (90 = 0.9%) and sub-dust remainders go to the pool address. Nothing is custodied.
 
