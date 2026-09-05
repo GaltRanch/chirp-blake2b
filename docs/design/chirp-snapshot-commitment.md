@@ -1,5 +1,10 @@
 # CHIRP snapshot commitment — making the registry verifiable
 
+> **Credit.** Committing the registry snapshot in the coinbase was proposed by
+> [Kilombino](https://github.com/Kilombino) in his review of these repos (2026-09-05), who also
+> submitted an independent implementation (#1). The follow-ups — committing the whole registry with an
+> `eligible` flag and the `CHIRP_SNAPSHOT_COMMIT` switch — come from that PR.
+
 **Problem.** The CHIRP draw and split are recomputable from the chain, but their *inputs* — each
 address's active tenure and 24h work — live in the pool's registry, off-chain. "Anyone can verify"
 was therefore conditional: you could check the math, not that the pool didn't inflate a friend's

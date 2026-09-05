@@ -28,6 +28,7 @@ Hughes, MIT) ported to **Bitcoin-BLAKE2b** and extended with the CHIRP economic 
   the payouts, and that the coinbase pays them exactly. The pool cannot rewrite tenure or work after a block
   exists; a miner can check their own numbers in every snapshot. What still rests on the pool is the
   registry being built honestly from shares — see `docs/design/chirp-snapshot-commitment.md`.
+  Idea and independent implementation by [Kilombino](https://github.com/Kilombino) (#1).
 - **Coinbase split** — winners are paid ∝ weight as outputs of the found block's coinbase. Pool fee
   `CHIRP_FEE_BPS` (90 = 0.9%) and sub-dust remainders go to the pool address. Nothing is custodied.
 
