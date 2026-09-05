@@ -2,6 +2,7 @@
 // y relleno del coinbase compartido con el split ponderado (seed = prevhash).
 #include "datum_chirp.h"
 #include "datum_chirp_glue.h"
+#include "datum_chirp_snapshot.h"
 #include "datum_stratum.h"
 #include "datum_utils.h"
 #include <pthread.h>
@@ -140,7 +141,37 @@ int chirp_glue_fill_outputs(void *job){
         s->available_coinbase_outputs[written].value_sats=payouts[i].sats;
         written++;
     }
-    DLOG_INFO("CHIRP fill: hv=%d coinbase_value=%llu candidates=%zu payouts=%zu written=%d pool_total=%llu", (s->block_template?s->block_template->header_version:-1), (unsigned long long)s->coinbase_value, nc, np, written, (unsigned long long)pool_total);
+    // --- CHIRP snapshot commitment (docs/chirp_snapshot_commitment.md) ---
+    // Commit a hash of the EXACT registry snapshot used for this draw into the coinbase
+    // (an OP_RETURN output, value 0) and publish that snapshot to a file, so the pool is
+    // bound on-chain to the tenure/power figures it used and cannot rewrite them later.
+    // Same `now` as the draw above → the commitment matches the state that paid out.
+    // On by default; set CHIRP_SNAPSHOT_COMMIT=0 to disable, CHIRP_SNAPSHOT_DIR to relocate.
+    char snaphex[65]; snaphex[0]=0;
+    {
+        const char *sc = getenv("CHIRP_SNAPSHOT_COMMIT");
+        bool snap_on = !(sc && (sc[0]=='0' || sc[0]=='n' || sc[0]=='N'));
+        if(snap_on){
+            unsigned char snaphash[32];
+            if(chirp_snapshot_hash(&g_chirp, now, snaphash)){
+                for(int hbi=0; hbi<32; hbi++) snprintf(snaphex+hbi*2, 3, "%02x", snaphash[hbi]);
+                if(written < 511){
+                    unsigned char opret[64];
+                    int olen = chirp_snapshot_opreturn(snaphash, opret, (int)sizeof(opret));
+                    if(olen > 0){
+                        memcpy(s->available_coinbase_outputs[written].output_script, opret, olen);
+                        s->available_coinbase_outputs[written].output_script_len = olen;
+                        s->available_coinbase_outputs[written].value_sats = 0;
+                        written++;
+                    }
+                }
+                const char *dir = getenv("CHIRP_SNAPSHOT_DIR");
+                chirp_snapshot_publish(&g_chirp, now, (dir && *dir) ? dir : "chirp_snapshots");
+            }
+        }
+    }
+
+    DLOG_INFO("CHIRP fill: hv=%d coinbase_value=%llu candidates=%zu payouts=%zu written=%d pool_total=%llu snapshot=%s", (s->block_template?s->block_template->header_version:-1), (unsigned long long)s->coinbase_value, nc, np, written, (unsigned long long)pool_total, snaphex[0]?snaphex:"off");
     s->available_coinbase_outputs_count=written;
     free(cands);
     pthread_mutex_unlock(&g_lock);

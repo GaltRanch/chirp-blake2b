@@ -22,6 +22,7 @@ add_executable(datum_gateway
 	src/datum_coinbaser.c
 	src/datum_chirp.c
 	src/datum_chirp_glue.c
+	src/datum_chirp_snapshot.c
 	src/datum_conf.c
 	src/datum_conf_tests.c
 	src/datum_gateway.c
