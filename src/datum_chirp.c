@@ -82,6 +82,11 @@ size_t chirp_candidates(chirp_registry_t *r, uint64_t now, double min_days, doub
     return k;
 }
 
+void chirp_member_stats(chirp_miner_t *m, uint64_t now, double *days, double *power){
+    if(days)  *days  = m->active_secs/86400.0;
+    if(power) *power = window_work(m, now);
+}
+
 // Uniforme determinista (0,1] por (seed,address). FNV-1a + splitmix64 (idéntico a chirp.rs::u01).
 double chirp_u01(uint64_t seed, const char *addr){
     uint64_t h = 0xcbf29ce484222325ULL ^ seed;

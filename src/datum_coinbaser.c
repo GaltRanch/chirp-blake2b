@@ -48,13 +48,12 @@
 #include <unistd.h>
 
 #include "datum_conf.h"
-#include "datum_chirp_glue.h"
-#include "datum_logger.h"
 #include "datum_utils.h"
 #include "datum_stratum.h"
 #include "datum_jsonrpc.h"
 #include "datum_protocol.h"
 #include "datum_coinbaser.h"
+#include "datum_chirp_glue.h"
 
 CURL *coinbaser_curl = NULL;
 
@@ -62,12 +61,13 @@ const char *cbstart_hex = "01000000010000000000000000000000000000000000000000000
 
 #define MAX_COINBASE_TAG_SPACE 86 // leaves space for BIP34 height, extranonces, datum prime tag, etc.
 
-int generate_coinbase_input(int height, char *cb, int *target_pot_index, const T_DATUM_TEMPLATE_DATA *tmpl) {
+int generate_coinbase_input(int height, char *cb, int *target_pot_index, const T_DATUM_TEMPLATE_DATA *tmpl, const char *sup_name) {
 	int cb_input_sz = 0;
 	int tag_len[2] = { 0, 0 };
 	int k, m, i;
 	int excess;
 	bool datum_active = false;
+	char sec_tag[96];
 	
 	// let's figure out our coinbase tags w/BIP34 height
 	i = append_UNum_hex(height, &cb[0]);
@@ -95,7 +95,17 @@ int generate_coinbase_input(int height, char *cb, int *target_pot_index, const T
 	} else {
 		tag_len[0] = strlen(datum_config.override_mining_coinbase_tag_primary);
 	}
-	tag_len[1] = strlen(datum_config.mining_coinbase_tag_secondary);
+	// Tag secundario efectivo: config + nombre del supplier del job (template/carousel) → visible en el scriptSig.
+	if (sup_name && sup_name[0]) {
+		if (datum_config.mining_coinbase_tag_secondary[0]) {
+			snprintf(sec_tag, sizeof(sec_tag), "%s/%s", datum_config.mining_coinbase_tag_secondary, sup_name);
+		} else {
+			snprintf(sec_tag, sizeof(sec_tag), "%s", sup_name);
+		}
+	} else {
+		snprintf(sec_tag, sizeof(sec_tag), "%s", datum_config.mining_coinbase_tag_secondary);
+	}
+	tag_len[1] = strlen(sec_tag);
 	k = tag_len[0] + tag_len[1] + 2;
 	if (!tag_len[1]) {
 		k--;
@@ -151,18 +161,19 @@ int generate_coinbase_input(int height, char *cb, int *target_pot_index, const T
 			if (!tag_len[1]) {
 				uchar_to_hex(&cb[i], 0x00); i+=2; cb_input_sz++;
 			} else {
-				uchar_to_hex(&cb[i], 0x0F); i+=2; cb_input_sz++;
+				// '/' literal (no el 0x0F DATUM): se ve igual en todos los explorers → "TAG/nombre"
+				uchar_to_hex(&cb[i], 0x2F); i+=2; cb_input_sz++;
 			}
 		} else {
 			// we wouldn't be here if there wasn't at least one other
 			if (tag_len[1]) {
-				uchar_to_hex(&cb[i], 0x0F); i+=2; cb_input_sz++;
+				uchar_to_hex(&cb[i], 0x2F); i+=2; cb_input_sz++;
 			}
 		}
 		
 		if (tag_len[1]) {
 			for(m=0;m<tag_len[1];m++) {
-				uchar_to_hex(&cb[i], (unsigned char)datum_config.mining_coinbase_tag_secondary[m]); i+=2; cb_input_sz++;
+				uchar_to_hex(&cb[i], (unsigned char)sec_tag[m]); i+=2; cb_input_sz++;
 			}
 			uchar_to_hex(&cb[i], 0x00); i+=2; cb_input_sz++;
 		}
@@ -383,7 +394,7 @@ void generate_base_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool ne
 	memcpy(&s->coinbase[0].coinb1[0], cbstart_hex, j);
 	cb1idx[0] = j;
 	
-	cb_input_sz = generate_coinbase_input(s->height, &cb[0], &target_pot_index, s->block_template);
+	cb_input_sz = generate_coinbase_input(s->height, &cb[0], &target_pot_index, s->block_template, s->carousel_supplier_name);
 	i = cb_input_sz << 1;
 	
 	// null terminate... probably not needed
@@ -548,13 +559,14 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
 		// No pool
 		s->pool_addr_script_len = addr_2_output_script(datum_config.mining_pool_address, &s->pool_addr_script[0], 64);
 		s->is_datum_job = false;
-		DLOG_INFO("CHIRP gate: flag=%d tmpl=%d hv=%d count=%d", datum_config.mining_blake2b_chirp, (s->block_template!=NULL), (s->block_template?s->block_template->header_version:-1), s->available_coinbase_outputs_count);
-		// CHIRP BLAKE2b: coinbase COMPARTIDO = split ponderado (fee 0.9% + dust → pool_addr como leftover).
+		// CHIRP (sindicato, coinbase COMPARTIDA): [OP_RETURN snapshot][supplier bps][ganadores ∝ peso…]; el leftover
+		// (fee + dust) va a pool_addr. Sin ganadores elegibles → solo pool_addr (empty_only). Con Carousel activo el
+		// supplier del job (s->carousel_supplier, pineado por apply_supplier) cobra template_supplier_bps.
 		if (datum_config.mining_blake2b_chirp && s->block_template && s->block_template->header_version >= 2 && s->available_coinbase_outputs_count == 0) {
 			chirp_glue_fill_outputs(s);
 			chirp_glue_maybe_save();
 		}
-		if (s->available_coinbase_outputs_count == 0) empty_only = true;   // sin ganadores elegibles → 100% a pool_addr
+		if (s->available_coinbase_outputs_count == 0) empty_only = true;
 	}
 	if (!s->pool_addr_script_len) {
 		DLOG_FATAL("Could not generate output script for pool addr! Perhaps invalid? This is bad.");
@@ -568,7 +580,7 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
 		cb1idx[i] = j;
 	}
 	
-	cb_input_sz = generate_coinbase_input(s->height, &cb[0], &target_pot_index, s->block_template);
+	cb_input_sz = generate_coinbase_input(s->height, &cb[0], &target_pot_index, s->block_template, s->carousel_supplier_name);
 	s->target_pot_index = target_pot_index;
 	i = cb_input_sz << 1;
 	
@@ -779,12 +791,93 @@ void generate_coinbase_txns_for_stratum_job(T_DATUM_STRATUM_JOB *s, bool empty_o
 		}
 	}
 
-	// A BLAKE2b job commits every client to ONE coinbase. Commit to the payout-carrying one (type 4, largest
-	// budget = CHIRP weighted split via available_coinbase_outputs) once the coinbaser has answered; type 0
-	// (pool address only) is the fallback until then / for solo. Fix ported from innerhat PR #17.
+	// BLAKE2b: el commitment/sia_coinb1 y el cbselect del job deben apuntar al MISMO coinbase que realmente se paga.
+	// Con split on-chain (available_coinbase_outputs → coinbase[4]) usamos el índice 4; sin split (LOTTO solo / sin
+	// ganadores) queda en 0 (pool default). Debe fijarse ANTES de refresh_blake2b para que compute el commitment correcto. PR#17
 	s->blake2b_coinbase_index = empty_only ? 0 : 4;
-
 	datum_stratum_job_refresh_blake2b(s);
+}
+
+// Personal-lotto BLAKE2b: arma el coinbase de UN usuario reusando el coinb1 del pool (IDÉNTICO: mismo
+// input/scriptSig/extranonce) y reconstruyendo SOLO los outputs en coinb2:
+//   [user 99.1%] + [fee 0.9% a la vanity PyBLØCK] + [witness commitment] + locktime.
+// El coinb1 del pool (coinbase[0]) ya está en bin cuando se llama (tras generate_coinbase_txns_for_stratum_job).
+// NO toca el coinbase compartido. Devuelve false si algo no valida/entra. El commitment per-user se computa
+// aparte con datum_blake2b_commit_for_coinbase(s, out, ...). Verificar SIEMPRE con decoderawtransaction + que el nodo acepte.
+// Carousel: address del supplier sorteado este ciclo (la setea datum_template_apply_supplier en datum_blocktemplates.c).
+char g_carousel_supplier[128] = {0};
+// Nombre del supplier del ciclo ("name" del template_live JSON), mismo ciclo de vida que g_carousel_supplier.
+// Se PINEA al job (s->carousel_supplier_name) en update_stratum_job → scriptSig (tag secundario). Sanitizado ASCII.
+char g_carousel_supplier_name[40] = {0};
+
+bool datum_blake2b_build_user_coinbase(T_DATUM_STRATUM_JOB *s,
+        const unsigned char *user_script, int user_script_len,
+        const unsigned char *fee_script, int fee_script_len,
+        uint16_t fee_bps, T_DATUM_STRATUM_COINBASE *out) {
+	int idx = 0, b, wc_len;
+	uint64_t total, fee_value, user_value;
+	unsigned char *c;
+	// Template mode: agrega output del supplier (1%) → discoverer 98% / supplier 1% / pool 1%.
+	unsigned char supplier_script[64];
+	int supplier_script_len = 0;
+	uint64_t supplier_value = 0;
+	uint16_t eff_fee_bps = fee_bps;
+	// Carousel → supplier PINEADO a este job (s->carousel_supplier, fijado al crear el job); single → config.
+	// (Antes leía la global g_carousel_supplier, que mutaba entre notify y submit → coinbase distinto → high-hash.)
+	const char *sup_addr = datum_config.mining_blake2b_template_carousel ? s->carousel_supplier : datum_config.mining_template_supplier_address;
+	bool tmpl = datum_config.mining_blake2b_template && sup_addr && sup_addr[0];
+
+	if (!s || !s->block_template || !user_script || !fee_script || !out) return false;
+	if (user_script_len <= 0 || user_script_len > 64) return false;
+	if (fee_script_len <= 0 || fee_script_len > 64) return false;
+	if (s->coinbase[0].coinb1_len <= 0 || s->coinbase[0].coinb1_len > (STRATUM_COINBASE1_MAX_LEN>>1)) return false;
+
+	total = s->coinbase_value;
+	if (tmpl) {
+		supplier_script_len = addr_2_output_script(sup_addr, supplier_script, sizeof(supplier_script));
+		if (supplier_script_len <= 0 || supplier_script_len > 64) {
+			tmpl = false;   // supplier inválido → cae a personal-lotto normal (fee param original)
+		} else {
+			eff_fee_bps = (uint16_t)datum_config.mining_template_pool_bps;
+			supplier_value = (total * (uint64_t)datum_config.mining_template_supplier_bps) / 10000ULL;
+		}
+	}
+	fee_value = (total * (uint64_t)eff_fee_bps) / 10000ULL;   // 0.9% lotto (90 bps) | 1% template (100 bps)
+	user_value = total - fee_value - supplier_value;
+
+	wc_len = (int)(strlen(s->block_template->default_witness_commitment) >> 1);
+	if (wc_len < 0 || wc_len > 48) wc_len = 0;
+
+	// coinb1 IDÉNTICO al del pool
+	memcpy(out->coinb1_bin, s->coinbase[0].coinb1_bin, s->coinbase[0].coinb1_len);
+	out->coinb1_len = s->coinbase[0].coinb1_len;
+
+	// coinb2 = sequence(4) + outcount(varint<0xfd) + user_out + fee_out + [witness_out] + locktime(4)
+	c = out->coinb2_bin;
+	c[idx++]=0xff; c[idx++]=0xff; c[idx++]=0xff; c[idx++]=0xff;                 // sequence
+	c[idx++]=(unsigned char)(2 + (tmpl?1:0) + (wc_len>0 ? 1 : 0));             // output count (+1 supplier en template)
+	for(b=0;b<8;b++) c[idx++]=(unsigned char)(user_value>>(8*b));              // discoverer value LE (98%)
+	c[idx++]=(unsigned char)user_script_len;
+	memcpy(&c[idx], user_script, user_script_len); idx += user_script_len;
+	if (tmpl) {                                                               // supplier out (1%)
+		for(b=0;b<8;b++) c[idx++]=(unsigned char)(supplier_value>>(8*b));
+		c[idx++]=(unsigned char)supplier_script_len;
+		memcpy(&c[idx], supplier_script, supplier_script_len); idx += supplier_script_len;
+	}
+	for(b=0;b<8;b++) c[idx++]=(unsigned char)(fee_value>>(8*b));               // fee value LE
+	c[idx++]=(unsigned char)fee_script_len;
+	memcpy(&c[idx], fee_script, fee_script_len); idx += fee_script_len;
+	if (wc_len > 0) {                                                          // witness commitment (value 0)
+		for(b=0;b<8;b++) c[idx++]=0x00;
+		c[idx++]=(unsigned char)wc_len;
+		memcpy(&c[idx], s->block_template->default_witness_commitment_bin, wc_len); idx += wc_len;
+	}
+	c[idx++]=0x00; c[idx++]=0x00; c[idx++]=0x00; c[idx++]=0x00;                // locktime
+	if (idx > (STRATUM_COINBASE2_MAX_LEN>>1)) return false;
+	out->coinb2_len = idx;
+	if (tmpl) DLOG_INFO("template coinbase: supplier_addr=%s discoverer=%"PRIu64" supplier=%"PRIu64" pool=%"PRIu64" outs=%d cbv=%"PRIu64,
+		sup_addr, user_value, supplier_value, fee_value, 2 + (tmpl?1:0) + (wc_len>0?1:0), total);
+	return true;
 }
 
 int datum_coinbaser_v2_parse(T_DATUM_STRATUM_JOB *s, unsigned char *coinbaser, int cblen, bool must_free) {

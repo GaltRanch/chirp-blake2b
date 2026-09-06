@@ -422,6 +422,8 @@ int addr_2_output_script(const char *addr, unsigned char *script, int max_len) {
 		// bitcoin mainnet and testnet BIP 0173
 		if (addr[0] == 't') {
 			hrp = "tb";
+		} else if ((al > 5) && (addr[2] == 'r') && (addr[3] == 't') && (addr[4] == '1')) {
+			hrp = "bcrt";   // regtest BIP 0173
 		}
 		i = segwit_addr_decode(&witver, witprog, &witprog_len, hrp, addr);
 		if (!i) {

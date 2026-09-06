@@ -198,6 +198,37 @@ typedef struct {
 
 extern const char *datum_blocktemplates_error;
 
+#include <pthread.h>
+#include <stdint.h>
+#include <stdbool.h>
+
+// Carousel — deterministic rotation state (BLAKE2b template mode).
+// Written by the template thread every work cycle, read by the API (/carousel).
+// Anyone can recompute `pick` from prevhash + the sorted fresh set + cycle (see datum_blocktemplates.c).
+// Cap on the fresh set: all cache files are collected, SORTED bytewise, and only then capped to the first
+// CAROUSEL_MAX_SET addresses — so the served set stays a pure function of the public data even above the cap.
+#define CAROUSEL_MAX_SET 4096
+typedef struct {
+	pthread_mutex_t lock;
+	char prevhash[80];
+	uint64_t height;
+	uint64_t updated;    // unix time of the last cycle
+	bool active;         // template/carousel mode currently active (false while below activate_height)
+	uint64_t activate_height; // template_activate_height from config (0 = from start)
+	uint32_t cycle;      // work cycles since this prevhash was first seen (0-based)
+	int n;               // fresh suppliers (cached template at this prevhash)
+	int n_prev_block;    // n at the last cycle of the previous prevhash (baseline for the fast re-cycle)
+	int start;           // uint64_be(BLAKE2b-256(prevhash hex)[0..8]) % n
+	int idx;             // (start + cycle + skipped) % n ; -1 = none applied
+	int skipped;         // always 0 since 2026-09-05: the schedule is never advanced past a failing template (kept for API compatibility)
+	bool failed;         // the scheduled template failed to load/apply this cycle → the gateway mined its own tx-set (no supplier paid)
+	char pick[128];      // supplier address served this cycle
+	char set_hash[17];   // BLAKE2b-256(set joined by "\n")[0..8] hex
+	int set_n;
+	char set[CAROUSEL_MAX_SET][128];
+} T_CAROUSEL_ROTATION;
+extern T_CAROUSEL_ROTATION g_carousel_rot;
+
 int datum_template_init(void);
 bool datum_gbt_parse_header_fields(json_t *gbt, T_DATUM_TEMPLATE_DATA *tdata);
 T_DATUM_TEMPLATE_DATA *datum_gbt_parser(json_t *gbt);

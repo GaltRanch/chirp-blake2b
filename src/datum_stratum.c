@@ -55,11 +55,11 @@
 #include "datum_blocktemplates.h"
 #include "datum_sockets.h"
 #include "datum_conf.h"
-#include "datum_chirp_glue.h"
 #include "datum_coinbaser.h"
 #include "datum_submitblock.h"
 #include "datum_protocol.h"
 #include "datum_pow.h"
+#include "datum_chirp_glue.h"   // CHIRP: registro de shares (tenure + trabajo 24h) — unificado con el árbol Carousel
 
 T_DATUM_SOCKET_APP *global_stratum_app = NULL;
 
@@ -745,35 +745,47 @@ static inline void send_unknown_work_error(T_DATUM_CLIENT_DATA *c, uint64_t id) 
 	send_error_to_client(c, id, "[20,\"unknown-work\",null]");
 }
 
+// DEBUG temporal (diagnóstico carousel): contar cada razón de reject y loguear el acumulado (1º y cada 20) →
+// así vemos en el log QUÉ reject domina, sin spamear. QUITAR después del diagnóstico.
+#define REJLOG(rs) do { static uint64_t _rc = 0; if ((((++_rc)) % 20) == 1) DLOG_INFO("REJECT-REASON=%s n=%" PRIu64, rs, _rc); } while (0)
+
 static inline void send_rejected_high_hash_error(T_DATUM_CLIENT_DATA *c, uint64_t id) {
+	REJLOG("high-hash");
 	send_error_to_client(c, id, "[23,\"high-hash\",null]");
 }
 
 static inline void send_rejected_stale(T_DATUM_CLIENT_DATA *c, uint64_t id) {
+	REJLOG("stale-work");
 	send_error_to_client(c, id, "[21,\"stale-work\",null]");
 }
 
 static inline void send_rejected_time_too_old(T_DATUM_CLIENT_DATA *c, uint64_t id) {
+	REJLOG("time-too-old");
 	send_error_to_client(c, id, "[21,\"time-too-old\",null]");
 }
 
 static inline void send_rejected_time_too_new(T_DATUM_CLIENT_DATA *c, uint64_t id) {
+	REJLOG("time-too-new");
 	send_error_to_client(c, id, "[21,\"time-too-new\",null]");
 }
 
 static inline void send_rejected_stale_block(T_DATUM_CLIENT_DATA *c, uint64_t id) {
+	REJLOG("stale-prevblk");
 	send_error_to_client(c, id, "[21,\"stale-prevblk\",null]");
 }
 
 static inline void send_rejected_hnotzero_error(T_DATUM_CLIENT_DATA *c, uint64_t id) {
+	REJLOG("H-not-zero");
 	send_error_to_client(c, id, "[23,\"H-not-zero\",null]");
 }
 
 static inline void send_bad_version_error(T_DATUM_CLIENT_DATA *c, uint64_t id) {
+	REJLOG("bad-version");
 	send_error_to_client(c, id, "[23,\"bad-version\",null]");
 }
 
 static inline void send_rejected_duplicate(T_DATUM_CLIENT_DATA *c, uint64_t id) {
+	REJLOG("duplicate");
 	send_error_to_client(c, id, "[22,\"duplicate\",null]");
 }
 
@@ -965,7 +977,7 @@ static void stratum_note_share(T_DATUM_MINER_DATA *m, bool accepted, uint64_t di
 	if (accepted) {
 		m->share_count_accepted++;
 		m->share_diff_accepted += diff;
-		if (datum_config.mining_blake2b_chirp) chirp_glue_record(m->last_auth_username, diff);
+		if (datum_config.mining_blake2b_chirp) chirp_glue_record(m->last_auth_username, diff);   // CHIRP: alimenta el registro
 		__atomic_add_fetch(&stratum_client_accepted_share_count, 1, __ATOMIC_RELAXED);
 		__atomic_add_fetch(&stratum_client_accepted_share_diff, diff, __ATOMIC_RELAXED);
 	} else {
@@ -975,6 +987,13 @@ static void stratum_note_share(T_DATUM_MINER_DATA *m, bool accepted, uint64_t di
 		__atomic_add_fetch(&stratum_client_rejected_share_diff, diff, __ATOMIC_RELAXED);
 	}
 }
+
+// Personal-lotto BLAKE2b: fee 0.9% a la vanity PyBLØCK + buffer thread-local para el coinbase per-usuario.
+// (T_DATUM_STRATUM_COINBASE es ~50KB por STRATUM_COINBASE2_MAX_LEN → NO va en el stack; TLS = un buffer por thread, sin race.)
+#define BLAKE2B_LOTTO_FEE_ADDR "1PyBLoCKdiaC46vD9CWcmxa3ey2VzSc5Q2"
+#define BLAKE2B_LOTTO_FEE_BPS 90
+static int datum_blake2b_lotto_fee_script(unsigned char *out, int max);
+static __thread T_DATUM_STRATUM_COINBASE g_blake2b_user_cb;
 
 int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj) {
 	// {"params": ["username", "job", "extranonce2", "time", "nonce", "version"], "id": 1, "method": "mining.submit"}
@@ -1018,6 +1037,8 @@ int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj
 	unsigned char root[32];
 	unsigned char coinbase_index = 0;
 	T_DATUM_STRATUM_COINBASE *cb = NULL;
+	unsigned char user_b2b_commit[32];   // personal-lotto: commitment del coinbase del minero
+	bool user_lotto = false;
 	unsigned char extranonce_bin[12];
 	
 	unsigned char block_header[80];
@@ -1172,6 +1193,18 @@ int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj
 		cb = &job->subsidy_only_coinbase;
 	} else {
 		cb = &job->coinbase[coinbase_index];
+		// Personal-lotto BLAKE2b: validar el share y ensamblar el bloque con el coinbase del minero (su address).
+		// Recomputa para ESTE job (no depende de cache) → siempre consistente con lo que minó el cliente.
+		if (blake2b_job && datum_config.mining_blake2b_personal_lotto && m->has_user_addr) {
+			unsigned char fscript[64];
+			int fsl = datum_blake2b_lotto_fee_script(fscript, sizeof(fscript));
+			unsigned char usia[39];
+			if ((fsl > 0) && datum_blake2b_build_user_coinbase(job, m->user_script, m->user_script_len, fscript, fsl, BLAKE2B_LOTTO_FEE_BPS, &g_blake2b_user_cb)) {
+				datum_blake2b_commit_for_coinbase(job, &g_blake2b_user_cb, job->blake2b_time_on_wire, user_b2b_commit, usia);
+				cb = &g_blake2b_user_cb;
+				user_lotto = true;
+			}
+		}
 	}
 	
 	if (!cb) {
@@ -1296,7 +1329,7 @@ int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj
 	}
 	
 	if (blake2b_job) {
-		if (!datum_blake2b_work_root(root, job->blake2b_commitment, extranonce_bin)) {
+		if (!datum_blake2b_work_root(root, user_lotto ? user_b2b_commit : job->blake2b_commitment, extranonce_bin)) {
 			send_unknown_work_error(c, id);
 			stratum_note_share(m, false, job_diff);
 			return 0;
@@ -1394,6 +1427,12 @@ int client_mining_submit(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_obj
 	if (!quickdiff) {
 		// check against job+connection target
 		if (compare_hashes(share_hash, m->stratum_job_targets[g_job_index]) > 0) {
+			// DEBUG temporal (diagnóstico carousel high-hash): edad del job, ring-slot vs global, ntime vs job-time.
+			{ static uint64_t _hd = 0; if (((++_hd) % 20) == 1)
+				DLOG_INFO("HIGH-HASH dbg: gidx=%d global=%llu age_ms=%llu user_lotto=%d ntime=%08x jtime=%08x",
+					g_job_index, (unsigned long long)job->global_index,
+					(unsigned long long)(current_time_millis() - job->tsms),
+					user_lotto ? 1 : 0, (unsigned int)ntime_val, (unsigned int)job->blake2b_time_on_wire); }
 			// bad target diff
 			send_rejected_high_hash_error(c, id);
 			stratum_note_share(m, false, job_diff);
@@ -1564,7 +1603,31 @@ int client_mining_authorize(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_
 	
 	strncpy(m->last_auth_username, username_s, sizeof(m->last_auth_username) - 1);
 	m->last_auth_username[sizeof(m->last_auth_username)-1] = 0;
-	
+
+	// Personal-lotto BLAKE2b: el username = la BTC address del minero → coinbase pagada a SU address.
+	// Se toma la parte antes de '.'/'_' (addr.worker / addr_worker). Address inválida → se rechaza (como ckpool btcsolo).
+	m->has_user_addr = false;
+	m->user_commit_job_index = -1;
+	if (datum_config.mining_blake2b_personal_lotto) {
+		char addrbuf[128];
+		int al = 0;
+		const char *p = username_s;
+		while (*p && *p != '.' && *p != '_' && al < (int)sizeof(addrbuf)-1) addrbuf[al++] = *p++;
+		addrbuf[al] = 0;
+		int sl = addr_2_output_script(addrbuf, m->user_script, sizeof(m->user_script));
+		if (sl > 0) {
+			m->user_script_len = sl;
+			m->has_user_addr = true;
+		} else {
+			char idbuf2[160];
+			stratum_rpc_id_text(c, id, idbuf2, sizeof(idbuf2));
+			snprintf(s, sizeof(s), "{\"error\":[20,\"personal-lotto: username must be your BTC address\",null],\"id\":%s,\"result\":false}\n", idbuf2);
+			datum_socket_send_string_to_client(c, s);
+			stratum_rpc_id_clear(c);
+			return 0;
+		}
+	}
+
 	char idbuf[160];
 	stratum_rpc_id_text(c, id, idbuf, sizeof(idbuf));
 	snprintf(s, sizeof(s), "{\"error\":null,\"id\":%s,\"result\":true}\n", idbuf);
@@ -1574,6 +1637,12 @@ int client_mining_authorize(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_
 	m->authorized = true;
 	
 	return 0;
+}
+
+// Output script de la fee address del personal-lotto. Barato (parsea una address fija) → sin cache, sin data-race.
+static int datum_blake2b_lotto_fee_script(unsigned char *out, int max) {
+	if (max < 64) return 0;
+	return addr_2_output_script(BLAKE2B_LOTTO_FEE_ADDR, out, max);
 }
 
 int send_mining_notify(T_DATUM_CLIENT_DATA *c, bool clean, bool quickdiff, bool new_block) {
@@ -1681,13 +1750,12 @@ int send_mining_notify(T_DATUM_CLIENT_DATA *c, bool clean, bool quickdiff, bool 
 	// coinbase selection is tacked on to the job ID
 	// prepending a Q means it's a duplicate job, but with a new diff (needed per stratum protocol "spec")
 	// prepending an N means this is an empty (subsidy-only) block with a small coinbase and has coinbase ID 255/0xff
-	if (new_block) {
-		cbselect = 0;
-	} else if (stratum_job_is_blake2b(j)) {
-		// BLAKE2b: the whole job commits to ONE coinbase (the sia hasher's extranonce lives in the header). cbselect
-		// is written into the job_id → the submit path reassembles THIS coinbase. It MUST equal the index used to
-		// build the commitment in refresh_blake2b (j->blake2b_coinbase_index), or the block is invalid. (PR #17)
+	if (stratum_job_is_blake2b(j)) {
+		// BLAKE2b: cbselect va en el job_id → el submit reconstruye coinbase[cbselect]. DEBE igualar el índice usado
+		// para construir el commitment en refresh_blake2b (j->blake2b_coinbase_index), o el bloque es inválido. PR#17
 		cbselect = (unsigned int)j->blake2b_coinbase_index;
+	} else if (new_block) {
+		cbselect = 0;
 	} else {
 		if (full_coinbase) {
 			cbselect = m->coinbase_selection;
@@ -1712,8 +1780,20 @@ int send_mining_notify(T_DATUM_CLIENT_DATA *c, bool clean, bool quickdiff, bool 
 	// for code readability purposes at the expense of a few extra calls.
 	datum_socket_send_string_to_client(c, s);
 	if (stratum_job_is_blake2b(j)) {
+		const unsigned char *sia_cb1 = j->blake2b_sia_coinb1;
+		// Personal-lotto: computar el coinbase del minero (su address 99.1% + fee 0.9%) y su commitment/sia_coinb1.
+		// Solo lee el job compartido (coinbase[0], template, branches) → thread-safe; escribe per-cliente.
+		if (datum_config.mining_blake2b_personal_lotto && m->has_user_addr) {
+			unsigned char fscript[64];
+			int fsl = datum_blake2b_lotto_fee_script(fscript, sizeof(fscript));
+			if ((fsl > 0) && datum_blake2b_build_user_coinbase(j, m->user_script, m->user_script_len, fscript, fsl, BLAKE2B_LOTTO_FEE_BPS, &g_blake2b_user_cb)) {
+				datum_blake2b_commit_for_coinbase(j, &g_blake2b_user_cb, j->blake2b_time_on_wire, m->user_commitment, m->user_sia_coinb1);
+				m->user_commit_job_index = j->global_index;
+				sia_cb1 = m->user_sia_coinb1;
+			}
+		}
 		for(i=0;i<(int)sizeof(j->blake2b_sia_coinb1);i++) {
-			uchar_to_hex(&cb1[i << 1], j->blake2b_sia_coinb1[i]);
+			uchar_to_hex(&cb1[i << 1], sia_cb1[i]);
 		}
 		cb1[sizeof(j->blake2b_sia_coinb1) << 1] = 0;
 		datum_socket_send_string_to_client(c, cb1);
@@ -2168,37 +2248,25 @@ void stratum_calculate_merkle_branches(T_DATUM_STRATUM_JOB *s) {
 	}
 }
 
-void datum_stratum_job_refresh_blake2b(T_DATUM_STRATUM_JOB *s) {
-	T_DATUM_TEMPLATE_DATA *block_template;
+// Computa (commitment, sia_coinb1) para UN coinbase dado, sobre el job s (branches compartidas).
+// Extraído de datum_stratum_job_refresh_blake2b para reusarlo con el coinbase per-usuario (personal-lotto):
+// cambiar el output del coinbase → otra merkle root → otro commitment → otro sia_coinb1.
+// El extranonce del coinbase blake2b es SIEMPRE 12 ceros (el miner varía el extranonce Sia en el work_root, no la coinbase).
+void datum_blake2b_commit_for_coinbase(T_DATUM_STRATUM_JOB *s, const T_DATUM_STRATUM_COINBASE *cb,
+                                       uint32_t time_on_wire, unsigned char *commitment_out, unsigned char *sia_coinb1_out) {
+	T_DATUM_TEMPLATE_DATA *block_template = s->block_template;
 	unsigned char zero_en[12] = {0};
 	unsigned char cb_txn[MAX_COINBASE_TXN_SIZE_BYTES];
 	unsigned char cb_hash[32];
 	unsigned char merkle[32];
-	const T_DATUM_STRATUM_COINBASE *cb;
 	uint32_t txcount;
-	uint32_t time_on_wire;
 	size_t cb_len;
-	int i;
 
-	if (!s || !s->block_template || s->block_template->header_version < 2) return;
-	block_template = s->block_template;
-	// commit to the SELECTED coinbase (0=pool-addr only, 4=payout split) — must match the cbselect sent in the
-	// job_id and the coinbase the submit path reassembles, or the block is invalid (PR #17).
-	cb = &s->coinbase[(s->blake2b_coinbase_index >= 0 && s->blake2b_coinbase_index < MAX_COINBASE_TYPES) ? s->blake2b_coinbase_index : 0];
 	if (block_template->header_transaction_count) {
 		txcount = block_template->header_transaction_count;
 	} else {
 		txcount = block_template->txn_count + 1;
 	}
-	time_on_wire = (uint32_t)block_template->curtime;
-
-	if (block_template->header_flags & DATUM_BLAKE2B_USE_TIME_OFFSET) {
-		if (!datum_blake2b_time_on_wire(&time_on_wire, block_template->curtime,
-				block_template->header_time_offset, block_template->header_flags)) {
-			time_on_wire = (uint32_t)block_template->curtime;
-		}
-	}
-	s->blake2b_time_on_wire = time_on_wire;
 
 	cb_len = (size_t)cb->coinb1_len + 12 + (size_t)cb->coinb2_len;
 	if (cb_len > sizeof(cb_txn)) cb_len = sizeof(cb_txn);
@@ -2209,12 +2277,37 @@ void datum_stratum_job_refresh_blake2b(T_DATUM_STRATUM_JOB *s) {
 	stratum_job_merkle_root_calc(s, cb_hash, merkle);
 
 	datum_blake2b_header_commitment(
-		s->blake2b_commitment, block_template->version, block_template->previousblockhash_bin,
+		commitment_out, block_template->version, block_template->previousblockhash_bin,
 		(uint32_t)block_template->height, merkle, time_on_wire, block_template->bits_uint,
 		txcount, block_template->header_flags, block_template->xor_key_mask_clear_bits,
 		block_template->xor_key, block_template->merge_mining_rhs);
+	datum_blake2b_sia_coinb1(sia_coinb1_out, commitment_out);
+}
+
+void datum_stratum_job_refresh_blake2b(T_DATUM_STRATUM_JOB *s) {
+	T_DATUM_TEMPLATE_DATA *block_template;
+	uint32_t time_on_wire;
+	int i;
+
+	if (!s || !s->block_template || s->block_template->header_version < 2) return;
+	block_template = s->block_template;
+	time_on_wire = (uint32_t)block_template->curtime;
+
+	if (block_template->header_flags & DATUM_BLAKE2B_USE_TIME_OFFSET) {
+		if (!datum_blake2b_time_on_wire(&time_on_wire, block_template->curtime,
+				block_template->header_time_offset, block_template->header_flags)) {
+			time_on_wire = (uint32_t)block_template->curtime;
+		}
+	}
+	s->blake2b_time_on_wire = time_on_wire;
+
+	// commitment/sia_coinb1 del coinbase realmente pagado (índice del coinbaser: 0=pool default, 4=split on-chain).
+	// El per-usuario (personal-lotto) se computa aparte con el mismo helper, sobre coinbase[0]. PR#17
+	{
+		int _cbi = (s->blake2b_coinbase_index >= 0 && s->blake2b_coinbase_index < MAX_COINBASE_TYPES) ? s->blake2b_coinbase_index : 0;
+		datum_blake2b_commit_for_coinbase(s, &s->coinbase[_cbi], time_on_wire, s->blake2b_commitment, s->blake2b_sia_coinb1);
+	}
 	datum_blake2b_sia_prevhash(s->blake2b_sia_prevhash, block_template->previousblockhash_bin);
-	datum_blake2b_sia_coinb1(s->blake2b_sia_coinb1, s->blake2b_commitment);
 
 	for(i=0;i<32;i++) {
 		uchar_to_hex(&s->prevhash[i << 1], s->blake2b_sia_prevhash[i]);
@@ -2222,6 +2315,8 @@ void datum_stratum_job_refresh_blake2b(T_DATUM_STRATUM_JOB *s) {
 	s->prevhash[64] = 0;
 }
 
+extern char g_carousel_supplier[128];   // datum_coinbaser.c: supplier sorteado del ciclo (se PINEA al job)
+extern char g_carousel_supplier_name[40]; // nombre del supplier del ciclo (se PINEA al job → scriptSig)
 void update_stratum_job(T_DATUM_TEMPLATE_DATA *block_template, bool new_block, int job_state) {
 	T_DATUM_STRATUM_JOB *s = &stratum_job_list[stratum_job_next];
 	int i;
@@ -2229,6 +2324,15 @@ void update_stratum_job(T_DATUM_TEMPLATE_DATA *block_template, bool new_block, i
 	
 	// clear the job memory
 	memset(s, 0, sizeof(T_DATUM_STRATUM_JOB));
+
+	// Carousel: PINEAR el supplier sorteado a ESTE job (apply_supplier lo dejó en la global justo antes de crear
+	// el job). Así el coinbase per-usuario del notify y del submit usan el MISMO supplier → commitment idéntico.
+	pthread_mutex_lock(&g_carousel_rot.lock);   // same lock the template thread holds while writing the globals
+	strncpy(s->carousel_supplier, g_carousel_supplier, sizeof(s->carousel_supplier) - 1);
+	s->carousel_supplier[sizeof(s->carousel_supplier) - 1] = 0;
+	strncpy(s->carousel_supplier_name, g_carousel_supplier_name, sizeof(s->carousel_supplier_name) - 1);
+	s->carousel_supplier_name[sizeof(s->carousel_supplier_name) - 1] = 0;
+	pthread_mutex_unlock(&g_carousel_rot.lock);
 	
 	// come up with a prefix for the job
 	// this ensures it is unique even if nothing else about the job has changed for some reason

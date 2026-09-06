@@ -30,7 +30,12 @@ Hughes, MIT) ported to **Bitcoin-BLAKE2b** and extended with the CHIRP economic 
   registry being built honestly from shares — see `docs/design/chirp-snapshot-commitment.md`.
   Idea and independent implementation by [Kilombino](https://github.com/Kilombino) (#1).
 - **Coinbase split** — winners are paid ∝ weight as outputs of the found block's coinbase. Pool fee
-  `CHIRP_FEE_BPS` (90 = 0.9%) and sub-dust remainders go to the pool address. Nothing is custodied.
+  `chirp_fee_bps` (config; default 90 = 0.9%) and sub-dust remainders go to the pool address. Nothing is custodied.
+- **CHIRP × Carousel** — the same gateway can mine Template Suppliers' node-validated templates picked by the
+  deterministic Carousel rotation (`blake2b_template` + `blake2b_template_carousel`); the supplier of the
+  mined template is paid `template_supplier_bps` of the coinbase by the same transaction. PyBLØCK runs
+  98 % syndicate · 1 % supplier · 1 % pool. Snapshot v2 commits the supplier and the full registry with an
+  `eligible` flag. See `docs/design/chirp-carousel.md`.
 
 > Status: **public / pre-release.** Running in production on the PyBLØCK BLAKE2b pool (first CHIRP blocks
 > paid dozens of miners on-chain in a single coinbase). Not audited.
@@ -72,9 +77,10 @@ on-chain. The whitepaper in `docs/` walks through it.
 ## Repository layout
 
 ```
-src/        gateway sources (upstream + BLAKE2b + CHIRP engine)
+src/        gateway sources (upstream + BLAKE2b + Carousel template mode + CHIRP engine)
 configs/    *.example.json only — sanitized
-docs/       CHIRP whitepaper (md / tex / pdf), payout design, UPSTREAM-README.md
+docs/       CHIRP whitepaper (md / tex / pdf), payout design, design/ (snapshot commitment, CHIRP × Carousel), UPSTREAM-README.md
+tools/      verify_chirp_block.py — verify a CHIRP block (v1/v2 snapshots) against the chain
 ```
 
 ## License

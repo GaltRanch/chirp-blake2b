@@ -30,7 +30,15 @@
     "coinbase_unique_id": 4342,
     "save_submitblocks_dir": "/var/lib/datum/submitblocks",
     "pow_algorithm": "blake2b",
-    "blake2b_chirp": true
+    "blake2b_chirp": true,
+    "chirp_fee_bps": 100,
+    "//template": "CHIRP x Carousel: the syndicate mines Template Suppliers' node-validated templates (deterministic rotation, see docs/design/chirp-carousel.md). Supplier earns template_supplier_bps of the coinbase; set blake2b_template to false for classic CHIRP on the node's own template.",
+    "blake2b_template": true,
+    "blake2b_template_carousel": true,
+    "template_dir": "/var/www/pyblock/data/template_live",
+    "template_require_validated": true,
+    "template_supplier_bps": 100,
+    "template_pool_bps": 100
   },
   "api": {
     "listen_addr": "127.0.0.1",

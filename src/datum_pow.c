@@ -203,9 +203,10 @@ bool datum_blake2b_header_commitment(
 
 	datum_blake2b_xor_key_hash(xor_key_hash, xor_key);
 
-	// H1 must hash the COMPLETE version (Knots GetCompleteVersion = 0x80000000 | nVersion). GBT reports
-	// the logical version without the header-v2 flag; OR it in as serialize does, or the node rejects
-	// valid shares as "high-hash". (Same fix as build-tmpl — CHIRP links its own datum_pow.c copy.)
+	// H1 must hash the COMPLETE version (Knots GetCompleteVersion = 0x80000000 | nVersion).
+	// GBT reports the logical version (e.g. 0x20000000) without the header-v2 flag, so we OR it in
+	// here exactly as datum_blake2b_serialize_block_header does. Omitting it computes the PoW over
+	// the wrong commitment -> valid shares are rejected by the node as "high-hash".
 	pk_u32le(h1_payload, o, version | UINT32_C(0x80000000)); o += 4;
 	datum_reverse32(h1_payload + o, prevhash); o += 32;
 	pk_u32le(h1_payload, o, height); o += 4;

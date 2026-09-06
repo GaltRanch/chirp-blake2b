@@ -162,8 +162,13 @@ typedef struct {
 	T_DATUM_STRATUM_COINBASE coinbase[MAX_COINBASE_TYPES];
 	T_DATUM_STRATUM_COINBASE subsidy_only_coinbase;
 	int target_pot_index; // where in coinb1 do we put our per-user vardiff pot value?
-	int blake2b_coinbase_index; // the one coinbase[] a BLAKE2b job commits to (0=pool-addr only, 4=payout split); commitment+cbselect+submit must all use it
-
+	int blake2b_coinbase_index; // BLAKE2b: which coinbase[] the commitment/cbselect use (0=pool default, 4=full split). PR#17
+	char carousel_supplier[128]; // Carousel: supplier sorteado PINEADO a este job (el 1% del coinbase per-usuario).
+	                             // Se fija al crear el job → notify y submit usan el MISMO → commitment consistente.
+	                             // (antes se leía la global g_carousel_supplier que mutaba entre notify/submit → high-hash.)
+	char carousel_supplier_name[40]; // Nombre del supplier ("name" del template_live JSON, del join X-PyBLOCK-Name),
+	                                 // PINEADO al job igual que carousel_supplier → va al scriptSig como tag secundario.
+	
 	uint64_t coinbase_value;
 	uint64_t height;
 	uint16_t enprefix;
@@ -260,7 +265,15 @@ typedef struct {
 	uint64_t forced_high_min_diff;
 	
 	int last_sent_stratum_job_index;
-	
+
+	// Personal-lotto BLAKE2b: la address del minero (de su username) → coinbase pagada a SU address.
+	bool has_user_addr;                     // el username autorizó como address válida (modo personal_lotto)
+	unsigned char user_script[64];          // output script de la address del minero
+	int user_script_len;
+	unsigned char user_commitment[32];      // commitment blake2b computado con el coinbase del minero (cache)
+	unsigned char user_sia_coinb1[39];      // sia_coinb1 del minero (lo que va en el mining.notify)
+	int user_commit_job_index;              // job_index para el que se computó user_commitment (-1 = ninguno)
+
 	T_DATUM_STRATUM_USER_STATS stats;
 	
 	T_DATUM_STRATUM_THREADPOOL_DATA *sdata;
@@ -268,6 +281,9 @@ typedef struct {
 
 extern int global_latest_stratum_job_index;
 extern pthread_rwlock_t stratum_global_job_ptr_lock;
+
+// Personal-lotto BLAKE2b: computa (commitment, sia_coinb1) de un coinbase dado sobre el job s (branches compartidas).
+void datum_blake2b_commit_for_coinbase(T_DATUM_STRATUM_JOB *s, const T_DATUM_STRATUM_COINBASE *cb, uint32_t time_on_wire, unsigned char *commitment_out, unsigned char *sia_coinb1_out);
 extern T_DATUM_STRATUM_JOB *global_cur_stratum_jobs[MAX_STRATUM_JOBS];
 
 const char *datum_stratum_mod_username(const char *username_s, char *username_buf, size_t username_buf_sz, uint16_t share_rnd, const char *modname, size_t modname_len);

@@ -37,6 +37,8 @@ void   chirp_init(chirp_registry_t *r);
 void   chirp_free(chirp_registry_t *r);
 void   chirp_record_share(chirp_registry_t *r, const char *addr, double work, uint64_t now);
 size_t chirp_candidates(chirp_registry_t *r, uint64_t now, double min_days, double min_power, chirp_cand_t *out, size_t max_out);
+// tenure activa (días) y trabajo 24h de UN miembro, con la misma poda de ventana que usa el gate — para el snapshot v2
+void   chirp_member_stats(chirp_miner_t *m, uint64_t now, double *days, double *power);
 size_t chirp_weighted_draw(const chirp_cand_t *cands, size_t nc, uint64_t seed, size_t n, chirp_cand_t *out);
 size_t chirp_split(const chirp_cand_t *cands, size_t nc, uint64_t total_value, uint16_t fee_bps, uint64_t seed, chirp_payout_t *out, uint64_t *pool_total);
 double chirp_u01(uint64_t seed, const char *addr);
