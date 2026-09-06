@@ -661,6 +661,11 @@ int datum_read_config(const char *conffile) {
 			datum_config.mining_chirp_fee_bps, datum_config.mining_template_supplier_bps);
 		return 0;
 	}
+	if (datum_config.mining_template_fast_recycle_ms > 0 && datum_config.mining_template_fast_recycle_ms < 100) {
+		// the template thread waits in 2.5 ms slices: anything under that would loop getblocktemplate with no sleep
+		DLOG_WARN("mining.template_fast_recycle_ms (%d) too small — clamped to 100 ms", datum_config.mining_template_fast_recycle_ms);
+		datum_config.mining_template_fast_recycle_ms = 100;
+	}
 	if (datum_config.mining_blake2b_chirp && datum_config.mining_blake2b_personal_lotto) {
 		DLOG_FATAL("mining.blake2b_chirp and mining.blake2b_personal_lotto are mutually exclusive (shared coinbase vs per-miner coinbase).");
 		return 0;
