@@ -150,6 +150,8 @@ const T_DATUM_CONFIG_ITEM datum_config_options[] = {
 		.required = false, .ptr = &datum_config.mining_template_require_validated, 	.default_bool = true },
 	{ .var_type = DATUM_CONF_INT, 		.category = "mining", 		.name = "template_activate_height",	.description = "Template/Carousel mode activates when the block template height reaches this value (0 = active from start). Below it the gateway mines its own tx-set with the plain coinbase (LOTTO), so the switch is atomic on-chain and needs no restart.",
 		.required = false, .ptr = &datum_config.mining_template_activate_height, 	.default_int = 0 },
+	{ .var_type = DATUM_CONF_INT, 		.category = "mining", 		.name = "carousel_block_stride",	.description = "Carousel: how far the rotation start advances per block (start = height*stride mod n; continuous). 0 = legacy (BLAKE2b(prevhash) mod n).",
+		.required = false, .ptr = &datum_config.mining_carousel_block_stride, 	.default_int = 0 },
 	{ .var_type = DATUM_CONF_STRING, 	.category = "mining", 		.name = "template_activate_tag",	.description = "Primary coinbase tag to switch to at template_activate_height (empty = keep coinbase_tag_primary).",
 		.required = false, .ptr = datum_config.mining_template_activate_tag,	.default_string[0] = "", .max_string_len = sizeof(datum_config.mining_template_activate_tag) },
 	{ .var_type = DATUM_CONF_INT, 		.category = "mining", 		.name = "template_fast_recycle_ms",	.description = "Carousel: right after a new block the fresh supplier set is still thin (suppliers publish for the new tip within seconds). While it is empty or below half of the previous block's set, the next work cycle comes after this many ms instead of work_update_seconds (default 5000, 0 = off).",

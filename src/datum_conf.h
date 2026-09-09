@@ -140,6 +140,7 @@ typedef struct {
 	bool mining_blake2b_template_carousel;  // Carousel: rotación DETERMINISTA (round-robin seeded por prevhash) sobre los suppliers frescos de template_dir; paga a ESE supplier. Requiere blake2b_template=true.
 	char mining_template_dir[256];     // dir de caches de supplier (template_live/) para el Carousel
 	int mining_template_activate_height;    // 0 = template mode activo desde el arranque; H>0 = LOTTO exacto hasta la template de altura H (inclusive activa)
+	int mining_carousel_block_stride;       // Carousel: avance del start por bloque (start=height*stride%n). 0=legacy.
 	char mining_template_activate_tag[256]; // tag primario del coinbase a partir de la activación ("" = no cambiar)
 	int mining_template_fast_recycle_ms;    // Carousel: si tras un bloque el set fresco es chico, próximo ciclo a los N ms (default 5000; 0 = off)
 	bool mining_template_require_validated; // solo servir templates con stamp de validación del ingest (validated.proposal==true, !stale). Default true.

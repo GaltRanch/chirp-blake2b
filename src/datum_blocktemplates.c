@@ -595,7 +595,7 @@ static bool datum_template_swap_from(json_t *res_val, json_t *sup, const char *o
 //   set     = supplier addresses whose cached template is fresh (previousblockhash == our tip),
 //             sorted bytewise ascending (filename minus .json = payout address)
 //   seed    = BLAKE2b-256(prevhash as lowercase hex ASCII)
-//   start   = uint64_be(seed[0..8]) % n
+//   start   = stride>0 ? (height*stride)%n (continuous) : uint64_be(BLAKE2b-256(prevhash)[0..8])%n (legacy; carousel_block_stride)
 //   cycle   = work cycles since this prevhash was first seen by this gateway (0-based, ~every
 //             work_update_seconds)
 //   pick    = set[(start + cycle + skipped) % n]   (skipped = scheduled templates that failed to
@@ -777,10 +777,16 @@ static void datum_template_apply_supplier(json_t *res_val) {
 			}
 		}
 
-		// seed = BLAKE2b-256(prevhash hex ascii); start = uint64_be(seed[0..8]) % n
-		datum_blake2b_256(h, (const unsigned char *)our_ph, strlen(our_ph));
-		for (i = 0; i < 8; i++) s = (s << 8) | h[i];
-		start = (int)(s % (uint64_t)n);
+		// start del ciclo. Dos modos deterministas y reproducibles desde datos on-chain:
+		//   stride>0 (continuo): start = (height * stride) mod n → el punto de inicio AVANZA por bloque.
+		//   stride==0 (legacy): start = uint64_be(BLAKE2b-256(prevhash)[0..8]) mod n.
+		if (datum_config.mining_carousel_block_stride > 0) {
+			start = (int)(((uint64_t)height * (uint64_t)datum_config.mining_carousel_block_stride) % (uint64_t)n);
+		} else {
+			datum_blake2b_256(h, (const unsigned char *)our_ph, strlen(our_ph));
+			for (i = 0; i < 8; i++) s = (s << 8) | h[i];
+			start = (int)(s % (uint64_t)n);
+		}
 
 		// The schedule is NEVER advanced past a failing template: pick = set[(start + cycle) % n], full stop.
 		// If that template fails to load/apply, this cycle mines the gateway's own tx-set with NO supplier
