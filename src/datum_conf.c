@@ -97,6 +97,10 @@ const T_DATUM_CONFIG_ITEM datum_config_options[] = {
 		.required = false, .ptr = &datum_config.stratum_v1_trust_proxy, 	.default_int = -1 },
 	{ .var_type = DATUM_CONF_INT, 		.category = "stratum", 		.name = "vardiff_min",				.description = "Work difficulty floor",
 		.required = false, .ptr = &datum_config.stratum_v1_vardiff_min, 				.default_int = 16384 },
+	{ .var_type = DATUM_CONF_INT, 		.category = "stratum", 		.name = "listen_port_highdiff",		.description = "Optional second Stratum listening port (0 = disabled). Clients connecting here get vardiff_min_highdiff as their difficulty floor (ASIC/rental port); everything else is shared with the main port",
+		.required = false, .ptr = &datum_config.stratum_v1_listen_port_highdiff, 		.default_int = 0 },
+	{ .var_type = DATUM_CONF_INT, 		.category = "stratum", 		.name = "vardiff_min_highdiff",		.description = "Work difficulty floor for clients that connected through listen_port_highdiff",
+		.required = false, .ptr = &datum_config.stratum_v1_vardiff_min_highdiff, 		.default_int = 4096 },
 	{ .var_type = DATUM_CONF_INT, 		.category = "stratum", 		.name = "vardiff_target_shares_min",.description = "Adjust work difficulty to target this many shares per minute",
 		.required = false, .ptr = &datum_config.stratum_v1_vardiff_target_shares_min, 	.default_int = 8 },
 	{ .var_type = DATUM_CONF_INT, 		.category = "stratum", 		.name = "vardiff_quickdiff_count",	.description = "How many shares before considering a quick diff update",
@@ -600,6 +604,14 @@ int datum_read_config(const char *conffile) {
 		return 0;
 	}
 	
+	if (datum_config.stratum_v1_listen_port_highdiff < 0 || datum_config.stratum_v1_listen_port_highdiff > 65535 || datum_config.stratum_v1_listen_port_highdiff == datum_config.stratum_v1_listen_port) {
+		DLOG_FATAL("Stratum server stratum.listen_port_highdiff must be 0 (disabled) or a valid port different from stratum.listen_port");
+		return false;
+	}
+	if (datum_config.stratum_v1_listen_port_highdiff && datum_config.stratum_v1_vardiff_min_highdiff < datum_config.stratum_v1_vardiff_min) {
+		DLOG_FATAL("Stratum server stratum.vardiff_min_highdiff must be >= stratum.vardiff_min");
+		return false;
+	}
 	if (datum_config.stratum_v1_vardiff_target_shares_min < 1) {
 		DLOG_FATAL("Stratum server stratum.vardiff_target_shares_min must be at least 1");
 		return 0;

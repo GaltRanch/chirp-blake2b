@@ -397,7 +397,7 @@ void clean_thread_data(T_DATUM_THREAD_DATA *d, T_DATUM_SOCKET_APP *app) {
 	d->app = app;
 }
 
-int assign_to_thread(T_DATUM_SOCKET_APP *app, int fd) {
+int assign_to_thread(T_DATUM_SOCKET_APP *app, int fd, bool highdiff) {
 	// Only one thread will be calling this function for a particular "app"
 	// under the current design.  Safe to assume that multiple clients will
 	// not cause overlap here.
@@ -543,6 +543,7 @@ int assign_to_thread(T_DATUM_SOCKET_APP *app, int fd) {
 	app->datum_threads[tid].client_data[cid].fd = fd;
 	app->datum_threads[tid].client_data[cid].cid = cid;
 	app->datum_threads[tid].client_data[cid].new_connection = true;
+	app->datum_threads[tid].client_data[cid].highdiff_port = highdiff;
 	app->datum_threads[tid].client_data[cid].datum_thread = (void *)&app->datum_threads[tid];
 	app->datum_threads[tid].client_data[cid].in_buf = 0;
 	app->datum_threads[tid].client_data[cid].out_buf = 0;
@@ -676,7 +677,7 @@ void *datum_gateway_listener_thread(void *arg) {
 	T_DATUM_SOCKET_APP *app = (T_DATUM_SOCKET_APP *)arg;
 	
 	struct epoll_event ev, events[MAX_EVENTS];
-	int listen_socks[2], conn_sock, nfds, epollfd;
+	int listen_socks[4] = {-1, -1, -1, -1}, conn_sock, nfds, epollfd;   // [0..1] main port, [2..3] optional high-diff port
 	
 	if (!app) {
 		DLOG_FATAL("Called without application data structure. :(");
@@ -711,6 +712,15 @@ void *datum_gateway_listener_thread(void *arg) {
 	}
 	if (listen_socks_len < 2) listen_socks[1] = -1;
 	
+	if (app->listen_port_highdiff > 0) {
+		size_t hd_len = 2;
+		if (!datum_sockets_setup_listening_sockets("stratum-highdiff", datum_config.stratum_v1_listen_addr, app->listen_port_highdiff, &listen_socks[2], &hd_len)) {
+			return NULL;
+		}
+		if (hd_len < 2) listen_socks[3] = -1;
+		DLOG_INFO("Stratum high-diff listener on port %d (difficulty floor %d)", app->listen_port_highdiff, datum_config.stratum_v1_vardiff_min_highdiff);
+	}
+	
 	epollfd = epoll_create1(0);
 	if (epollfd < 0) {
 		DLOG_FATAL("epoll_create1 failed: %s", strerror(errno));
@@ -718,7 +728,7 @@ void *datum_gateway_listener_thread(void *arg) {
 		return NULL;
 	}
 	
-	for (i = 0; i < 2; ++i) {
+	for (i = 0; i < 4; ++i) {
 		if (listen_socks[i] == -1) continue;
 		ev.events = EPOLLIN;
 		ev.data.fd = listen_socks[i];
@@ -745,7 +755,8 @@ void *datum_gateway_listener_thread(void *arg) {
 			}
 		}
 		for (int n = 0; n < nfds; ++n) {
-			if (events[n].data.fd == listen_socks[0] || events[n].data.fd == listen_socks[1]) {
+			const bool is_highdiff = (events[n].data.fd == listen_socks[2] || events[n].data.fd == listen_socks[3]);
+			if (events[n].data.fd == listen_socks[0] || events[n].data.fd == listen_socks[1] || is_highdiff) {
 				conn_sock = accept(events[n].data.fd, NULL, NULL);
 				if (conn_sock < 0) {
 					DLOG_ERROR("accept failed: %s", strerror(errno));
@@ -767,7 +778,7 @@ void *datum_gateway_listener_thread(void *arg) {
 				datum_socket_setoptions(conn_sock);
 				
 				// assign socket to a thread
-				i = assign_to_thread(app, conn_sock);
+				i = assign_to_thread(app, conn_sock, is_highdiff);
 				if (!i) {
 					// error finding a thread (too many connections?)
 					DLOG_DEBUG("Closing socket we couldn't assign %d", conn_sock);

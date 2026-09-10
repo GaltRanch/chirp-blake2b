@@ -167,6 +167,7 @@ void *datum_stratum_v1_socket_server(void *arg) {
 	
 	// set listen port
 	app->listen_port = datum_config.stratum_v1_listen_port;
+	app->listen_port_highdiff = datum_config.stratum_v1_listen_port_highdiff;
 	
 	// setup limits
 	app->max_clients_thread = datum_config.stratum_v1_max_clients_per_thread;
@@ -364,6 +365,13 @@ void datum_stratum_v1_socket_thread_client_new(T_DATUM_CLIENT_DATA *c) {
 	
 	static uint64_t unique_id_ctr = 0;
 	m->unique_id = unique_id_ctr++;
+	
+	// high-diff listener (stratum.listen_port_highdiff): start at, and never drop below, vardiff_min_highdiff.
+	// forced_high_min_diff is the same floor the vardiff loop already honours (used by the NiceHash fingerprint).
+	if (c->highdiff_port && datum_config.stratum_v1_vardiff_min_highdiff > 0) {
+		m->forced_high_min_diff = datum_config.stratum_v1_vardiff_min_highdiff;
+		m->current_diff = datum_config.stratum_v1_vardiff_min_highdiff;
+	}
 	
 	// set initial connection time
 	// if this is the first client on the thread, we won't have a loop_tsms yet
@@ -1960,7 +1968,8 @@ int client_mining_subscribe(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_
 	}
 	
 	// set default diff
-	m->current_diff = datum_config.stratum_v1_vardiff_min;
+	// start at the configured floor, or the per-client forced floor if higher (high-diff listener / NiceHash fingerprint)
+	m->current_diff = (m->forced_high_min_diff > (uint64_t)datum_config.stratum_v1_vardiff_min) ? m->forced_high_min_diff : (uint64_t)datum_config.stratum_v1_vardiff_min;
 	
 	// default to the antminer workaround, which appears to be universally compatible
 	// except for NiceHash.
@@ -1981,6 +1990,9 @@ int client_mining_subscribe(T_DATUM_CLIENT_DATA *c, uint64_t id, json_t *params_
 		datum_stratum_fingerprint_by_UA(m);
 		if (m->current_diff < datum_config.stratum_v1_vardiff_min) {
 			m->current_diff = datum_config.stratum_v1_vardiff_min;
+		}
+		if (m->current_diff < m->forced_high_min_diff) {
+			m->current_diff = m->forced_high_min_diff;
 		}
 	}
 	

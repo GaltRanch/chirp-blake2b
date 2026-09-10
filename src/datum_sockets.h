@@ -82,6 +82,9 @@ typedef struct T_DATUM_CLIENT_DATA {
 	
 	int proxy_line_read;
 	
+	// true when the client connected through the optional high-diff listener (stratum.listen_port_highdiff)
+	bool highdiff_port;
+	
 	T_DATUM_THREAD_DATA *datum_thread;
 } T_DATUM_CLIENT_DATA;
 
@@ -105,6 +108,9 @@ typedef struct {
 	
 	// TCP port this server will listen on
 	int listen_port;
+	
+	// Optional second listening port (0 = none). Clients from here are flagged highdiff_port.
+	int listen_port_highdiff;
 	
 	// Maximum clients each thread can handle
 	int max_clients_thread;
@@ -171,7 +177,7 @@ void datum_socket_setoptions(int sock);
 int datum_socket_send_string_to_client(T_DATUM_CLIENT_DATA *c, char *s);
 int datum_socket_send_chars_to_client(T_DATUM_CLIENT_DATA *c, char *s, int len);
 
-int assign_to_thread(T_DATUM_SOCKET_APP *app, int fd);
+int assign_to_thread(T_DATUM_SOCKET_APP *app, int fd, bool highdiff);
 void *datum_threadpool_thread(void *arg);
 
 static inline void datum_socket_thread_client_count_decrement(T_DATUM_THREAD_DATA *my, int cid_who_left, bool not_already_locked) {
