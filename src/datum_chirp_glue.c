@@ -1,9 +1,12 @@
 // datum_chirp_glue.c — CHIRP ↔ datum: registro global thread-safe, persistencia (jansson),
 // y relleno del coinbase compartido con el split ponderado (seed = prevhash).
+// Unificado con el árbol Carousel (2026-09-06): el sindicato mina templates de suppliers; el supplier del job
+// cobra template_supplier_bps y el pool chirp_fee_bps (leftover). Snapshot v2 comprometido en el coinbase.
 #include "datum_chirp.h"
 #include "datum_chirp_glue.h"
 #include "datum_stratum.h"
 #include "datum_utils.h"
+#include "datum_conf.h"
 #include <pthread.h>
 #include <time.h>
 #include <string.h>
@@ -35,7 +38,6 @@ static void chirp_load_locked(uint64_t now){
         const char *addr; json_t *mo;
         uint64_t cutoff = now > CHIRP_WINDOW_SECS ? now - CHIRP_WINDOW_SECS : 0;
         json_object_foreach(miners, addr, mo){
-            // sembrar el miner
             chirp_record_share(&g_chirp, addr, 0.0, now);   // crea/toca; corregimos abajo
             for(size_t i=0;i<g_chirp.n;i++){
                 if(strncmp(g_chirp.miners[i].addr,addr,CHIRP_ADDR_MAX-1)) continue;
@@ -115,34 +117,44 @@ void chirp_glue_maybe_save(void){
     pthread_mutex_unlock(&g_lock);
 }
 
-// ── Snapshot comprometido en el coinbase ─────────────────────────────────────────────────────────
+// ── Snapshot v2 comprometido en el coinbase ──────────────────────────────────────────────────
 // Canonical JSON (jansson JSON_COMPACT|JSON_SORT_KEYS, SOLO enteros y strings — nunca floats, para que
 // Python `json.dumps(obj, sort_keys=True, separators=(",",":"))` produzca los MISMOS bytes) → BLAKE2b-256.
-// Los doubles (weight, umbrales) van como bits IEEE754 en hex / strings %.17g: el verificador reusa los bits
-// exactos y además recomputa el peso desde active_secs/power con tolerancia.
+// v2 (idea de Kilombino, PR #1): va el REGISTRO COMPLETO con flag `eligible` (el gate también se verifica),
+// más supplier/bps del job (CHIRP × Carousel). Los doubles van como bits IEEE754 hex / strings %.17g.
 static const char *chirp_snapshot_dir(void){
     const char *e = getenv("CHIRP_SNAPSHOT_DIR");
     return (e && *e) ? e : CHIRP_SNAPSHOT_DIR_DFLT;
 }
+static bool chirp_snapshot_enabled(void){
+    const char *e = getenv("CHIRP_SNAPSHOT_COMMIT");   // kill-switch (Kilombino PR #1): "0"/"n" desactiva
+    return !(e && (e[0]=='0' || e[0]=='n' || e[0]=='N'));
+}
 static void dbl_bits_hex(double d, char out[19]){ uint64_t u; memcpy(&u,&d,8); snprintf(out,19,"0x%016llx",(unsigned long long)u); }
 
-// Escribe el snapshot (si no existe) y devuelve el hash en *hash32. Poda archivos >48h cada ~200 llamadas.
 static bool chirp_snapshot_commit(const T_DATUM_STRATUM_JOB *s, uint64_t now, uint64_t seed,
                                   const chirp_cand_t *cands, size_t nc, const chirp_payout_t *payouts, size_t np,
-                                  uint64_t pool_total, double min_days, double min_power, unsigned char hash32[32]){
+                                  uint64_t pool_total, double min_days, double min_power, uint16_t fee_bps,
+                                  const char *supplier, uint16_t supplier_bps, uint64_t supplier_sats,
+                                  uint64_t split_total, unsigned char hash32[32]){
     char buf[64], ph[65];
     for(int i=0;i<32;i++) snprintf(&ph[i*2],3,"%02x",s->prevhash_bin[31-i]);   // orden display (getblockhash)
-    json_t *o=json_object(), *ca=json_array(), *pa=json_array();
-    json_object_set_new(o,"v",json_integer(1));
+    json_t *o=json_object(), *ca=json_array(), *pa=json_array(), *reg=json_array();
+    json_object_set_new(o,"v",json_integer(2));
     json_object_set_new(o,"tag",json_string(CHIRP_SNAPSHOT_TAG));
     json_object_set_new(o,"height",json_integer((json_int_t)s->height));
     json_object_set_new(o,"prevhash",json_string(ph));
     snprintf(buf,sizeof(buf),"%llu",(unsigned long long)seed); json_object_set_new(o,"seed",json_string(buf));
     json_object_set_new(o,"ts",json_integer((json_int_t)now));
     json_object_set_new(o,"coinbase_value",json_integer((json_int_t)s->coinbase_value));
-    json_object_set_new(o,"fee_bps",json_integer(CHIRP_FEE_BPS));
+    json_object_set_new(o,"fee_bps",json_integer(fee_bps));
     json_object_set_new(o,"max_n",json_integer(CHIRP_MAX_N));
     json_object_set_new(o,"min_payout_sats",json_integer((json_int_t)CHIRP_MIN_PAYOUT_SATS));
+    // CHIRP × Carousel: el supplier del job y su parte (0 sats / "" si no hay template inyectado)
+    json_object_set_new(o,"supplier",json_string(supplier ? supplier : ""));
+    json_object_set_new(o,"supplier_bps",json_integer(supplier_bps));
+    json_object_set_new(o,"supplier_sats",json_integer((json_int_t)supplier_sats));
+    json_object_set_new(o,"split_total",json_integer((json_int_t)split_total));   // coinbase_value − supplier_sats: lo que reparte el sorteo (fee + ganadores)
     double days_full = CHIRP_DAYS_FULL, power_full = CHIRP_POWER_FULL; { const char *e;
       if((e=getenv("CHIRP_DAYS_FULL"))&&*e&&atof(e)>0) days_full=atof(e);
       if((e=getenv("CHIRP_POWER_FULL"))&&*e&&atof(e)>0) power_full=atof(e); }
@@ -150,6 +162,17 @@ static bool chirp_snapshot_commit(const T_DATUM_STRATUM_JOB *s, uint64_t now, ui
     snprintf(buf,sizeof(buf),"%.17g",min_power);  json_object_set_new(o,"min_power",json_string(buf));
     snprintf(buf,sizeof(buf),"%.17g",days_full);  json_object_set_new(o,"days_full",json_string(buf));
     snprintf(buf,sizeof(buf),"%.17g",power_full); json_object_set_new(o,"power_full",json_string(buf));
+    // registro COMPLETO (v2): cada miembro con tenure/trabajo y si pasó el gate — lo que el sorteo VIO
+    for(size_t i=0;i<g_chirp.n;i++){
+        chirp_miner_t *m=&g_chirp.miners[i]; double days=0, power=0;
+        chirp_member_stats(m, now, &days, &power);
+        json_t *r=json_object();
+        json_object_set_new(r,"addr",json_string(m->addr));
+        json_object_set_new(r,"active_secs",json_integer((json_int_t)m->active_secs));
+        json_object_set_new(r,"power",json_integer((json_int_t)power));
+        json_object_set_new(r,"eligible",json_boolean(days>=min_days && power>=min_power));
+        json_array_append_new(reg,r);
+    }
     for(size_t i=0;i<nc;i++){
         json_t *c=json_object(); char wb[19]; dbl_bits_hex(cands[i].weight,wb);
         json_object_set_new(c,"addr",json_string(cands[i].addr));
@@ -164,6 +187,7 @@ static bool chirp_snapshot_commit(const T_DATUM_STRATUM_JOB *s, uint64_t now, ui
         json_object_set_new(p,"sats",json_integer((json_int_t)payouts[i].sats));
         json_array_append_new(pa,p);
     }
+    json_object_set_new(o,"registry",reg);
     json_object_set_new(o,"candidates",ca);
     json_object_set_new(o,"payouts",pa);
     json_object_set_new(o,"pool_total",json_integer((json_int_t)pool_total));
@@ -196,9 +220,9 @@ static bool chirp_snapshot_commit(const T_DATUM_STRATUM_JOB *s, uint64_t now, ui
     return ok;
 }
 
-// Rellena job->available_coinbase_outputs[] con [OP_RETURN commitment, ganador_i ∝ weight …]. El leftover
-// (fee 0.9% + dust) lo paga datum al pool_addr automáticamente. seed = primeros 8 bytes de prevhash_bin (LE).
-// El output 0 es el commitment del snapshot (0 sats, 40 bytes) para que SIEMPRE quepa. Devuelve #outputs.
+// Rellena job->available_coinbase_outputs[] con [OP_RETURN commitment][supplier bps][ganador_i ∝ weight …].
+// El leftover (chirp_fee_bps + dust) lo paga datum al pool_addr automáticamente. seed = primeros 8 bytes de
+// prevhash_bin (LE). El OP_RETURN es el output 0 (0 sats, 40 bytes) para que SIEMPRE quepa. Devuelve #outputs.
 int chirp_glue_fill_outputs(void *job){
     T_DATUM_STRATUM_JOB *s = (T_DATUM_STRATUM_JOB*)job;
     if(!s || s->coinbase_value==0) return 0;
@@ -216,17 +240,39 @@ int chirp_glue_fill_outputs(void *job){
     { const char *e;
       if((e=getenv("CHIRP_MIN_DAYS"))  && *e) min_days  = atof(e);
       if((e=getenv("CHIRP_MIN_POWER")) && *e) min_power = atof(e); }
+    uint16_t fee_bps = (uint16_t)(datum_config.mining_chirp_fee_bps > 0 ? datum_config.mining_chirp_fee_bps : CHIRP_FEE_BPS);
+
+    // CHIRP × Carousel: si el job lleva template de un supplier (pineado por apply_supplier), el supplier cobra
+    // template_supplier_bps de la coinbase COMPLETA; el sorteo reparte el resto (menos la fee del pool).
+    const char *supplier = (datum_config.mining_blake2b_template && s->carousel_supplier[0]) ? s->carousel_supplier : NULL;
+    uint16_t supplier_bps = supplier ? (uint16_t)datum_config.mining_template_supplier_bps : 0;
+    uint64_t supplier_sats = supplier ? (uint64_t)(((unsigned __int128)s->coinbase_value * supplier_bps) / 10000) : 0;
+    unsigned char sup_script[64]; int sup_len = 0;
+    if(supplier){
+        sup_len = addr_2_output_script(supplier, sup_script, 64);
+        if(sup_len <= 0){ DLOG_WARN("CHIRP: supplier %s address inválida — su parte cae al pool", supplier); supplier_sats = 0; supplier_bps = 0; }
+    }
+    uint64_t split_total = s->coinbase_value - supplier_sats;
+
     size_t nc=chirp_candidates(&g_chirp, now, min_days, min_power, cands, cap);
-    size_t np=chirp_split(cands, nc, s->coinbase_value, CHIRP_FEE_BPS, seed, payouts, &pool_total);
+    size_t np=chirp_split(cands, nc, split_total, fee_bps, seed, payouts, &pool_total);
     // output 0: OP_RETURN "CHIRP1" || BLAKE2b-256(snapshot)  →  6a 26 <38 bytes>
     unsigned char h32[32]; char hx[65]="";
-    if(chirp_snapshot_commit(s, now, seed, cands, nc, payouts, np, pool_total, min_days, min_power, h32)){
+    if(chirp_snapshot_enabled() && chirp_snapshot_commit(s, now, seed, cands, nc, payouts, np, pool_total, min_days, min_power,
+                                                          fee_bps, supplier, supplier_bps, supplier_sats, split_total, h32)){
         unsigned char *sc=s->available_coinbase_outputs[written].output_script;
         sc[0]=0x6a; sc[1]=6+32; memcpy(&sc[2],CHIRP_SNAPSHOT_TAG,6); memcpy(&sc[8],h32,32);
         s->available_coinbase_outputs[written].output_script_len=2+6+32;
         s->available_coinbase_outputs[written].value_sats=0;
         written++;
         for(int i=0;i<32;i++) snprintf(&hx[i*2],3,"%02x",h32[i]);
+    }
+    // output 1: supplier (CHIRP × Carousel)
+    if(supplier && sup_len > 0 && supplier_sats >= CHIRP_MIN_PAYOUT_SATS){
+        memcpy(s->available_coinbase_outputs[written].output_script, sup_script, sup_len);
+        s->available_coinbase_outputs[written].output_script_len=sup_len;
+        s->available_coinbase_outputs[written].value_sats=supplier_sats;
+        written++;
     }
     for(size_t i=0;i<np && written<500;i++){
         unsigned char script[64];
@@ -237,7 +283,9 @@ int chirp_glue_fill_outputs(void *job){
         s->available_coinbase_outputs[written].value_sats=payouts[i].sats;
         written++;
     }
-    DLOG_INFO("CHIRP fill: hv=%d h=%llu coinbase_value=%llu candidates=%zu payouts=%zu written=%d pool_total=%llu snapshot=%s", (s->block_template?s->block_template->header_version:-1), (unsigned long long)s->height, (unsigned long long)s->coinbase_value, nc, np, written, (unsigned long long)pool_total, hx[0]?hx:"none");
+    DLOG_INFO("CHIRP fill: hv=%d h=%llu coinbase_value=%llu candidates=%zu payouts=%zu written=%d pool_total=%llu fee_bps=%u supplier=%s supplier_sats=%llu snapshot=%s",
+        (s->block_template?s->block_template->header_version:-1), (unsigned long long)s->height, (unsigned long long)s->coinbase_value,
+        nc, np, written, (unsigned long long)pool_total, fee_bps, supplier ? supplier : "-", (unsigned long long)supplier_sats, hx[0]?hx:"none");
     s->available_coinbase_outputs_count=written;
     free(cands);
     pthread_mutex_unlock(&g_lock);

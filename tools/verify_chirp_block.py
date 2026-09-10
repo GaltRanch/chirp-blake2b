@@ -56,6 +56,26 @@ def recompute(snap: dict):
     problems = []
     days_full, power_full = float(snap["days_full"]), float(snap["power_full"])
     seed = int(snap["seed"])
+    ver = int(snap.get("v", 1))
+    if ver >= 2:
+        # v2: the FULL registry is committed with an `eligible` flag — re-check the gate and that the candidate
+        # set is exactly the eligible members (nobody added, nobody left out).
+        min_days, min_power = float(snap["min_days"]), float(snap["min_power"])
+        elig = set()
+        for r in snap["registry"]:
+            e = (r["active_secs"] / 86400.0 >= min_days) and (float(r["power"]) >= min_power)
+            if bool(r["eligible"]) != e:
+                problems.append(f"gate mismatch for {r['addr']}: snapshot eligible={r['eligible']} vs recomputed {e}")
+            if e: elig.add(r["addr"])
+        cset = {c["addr"] for c in snap["candidates"]}
+        if cset != elig:
+            problems.append(f"candidates != eligible registry members (+{sorted(cset - elig)[:3]} -{sorted(elig - cset)[:3]})")
+        # CHIRP × Carousel: the template supplier takes supplier_bps of the WHOLE coinbase, the draw splits the rest
+        sup_re = (int(snap["coinbase_value"]) * int(snap["supplier_bps"])) // 10000 if snap.get("supplier") else 0
+        if sup_re != int(snap["supplier_sats"]):
+            problems.append(f"supplier_sats mismatch: snapshot {snap['supplier_sats']} vs recomputed {sup_re}")
+        if int(snap["coinbase_value"]) - int(snap["supplier_sats"]) != int(snap["split_total"]):
+            problems.append("split_total != coinbase_value - supplier_sats")
     cands = []
     for c in snap["candidates"]:
         w_bits = bits_to_double(c["weight_bits"])
@@ -69,7 +89,7 @@ def recompute(snap: dict):
     keyed = [(math.pow(u01(seed, a), 1.0 / w), a, w) for a, w in cands if w > 0]
     keyed.sort(key=lambda t: -t[0])
     winners = keyed[: int(snap["max_n"])]
-    total = int(snap["coinbase_value"]); fee_bps = int(snap["fee_bps"])
+    total = int(snap["split_total"]) if ver >= 2 else int(snap["coinbase_value"]); fee_bps = int(snap["fee_bps"])
     base_fee = (total * fee_bps) // 10000
     distributable = total - base_fee if total > base_fee else 0
     total_w = sum(w for _, _, w in winners)
@@ -85,6 +105,31 @@ def recompute(snap: dict):
     if total - assigned != int(snap["pool_total"]):
         problems.append(f"pool_total mismatch: snapshot {snap['pool_total']} vs recomputed {total - assigned}")
     return problems, payouts
+
+
+_B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+_BECH = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
+
+def addr_to_spk(addr: str) -> str | None:
+    """scriptPubKey hex for a payout address, derived locally (no node/wallet needed, network-agnostic — the
+    coinbase script is what the chain enforces, regardless of how the node prints the address)."""
+    a = addr.lower()
+    if a.startswith(("bc1", "tb1", "bcrt1")):
+        _, data = a.rsplit("1", 1)
+        d = [_BECH.index(c) for c in data][:-6]
+        ver, acc, bits, prog = d[0], 0, 0, bytearray()
+        for v in d[1:]:
+            acc = (acc << 5) | v; bits += 5
+            while bits >= 8:
+                bits -= 8; prog.append((acc >> bits) & 0xFF)
+        return bytes([0x00 if ver == 0 else 0x50 + ver, len(prog)]).hex() + prog.hex()
+    n = 0
+    for c in addr: n = n * 58 + _B58.index(c)
+    raw = n.to_bytes(25, "big"); v, h = raw[0], raw[1:21].hex()
+    if v == 0: return "76a914" + h + "88ac"
+    if v == 5: return "a914" + h + "87"
+    return None
 
 
 def load_snapshot_by_hash(hx: str, snapshot_dir: str | None, url: str | None) -> bytes:
@@ -138,8 +183,8 @@ def main() -> int:
         spk = bytes.fromhex(o["scriptPubKey"]["hex"])
         if spk[:2] == bytes([0x6a, 0x26]) and spk[2:8] == TAG and len(spk) == 40:
             commit = spk[8:].hex()
-        elif o["value"] > 0 and o["scriptPubKey"].get("address"):
-            outs[o["scriptPubKey"]["address"]] = outs.get(o["scriptPubKey"]["address"], 0) + round(o["value"] * 1e8)
+        elif o["value"] > 0:
+            outs[spk.hex()] = outs.get(spk.hex(), 0) + round(o["value"] * 1e8)
     if not commit:
         print(f"block {a.height}: no CHIRP1 commitment in the coinbase (pre-commitment block or not a CHIRP block)"); return 2
     print(f"block {a.height} {bh[:16]}… commitment={commit}")
@@ -154,11 +199,17 @@ def main() -> int:
     problems, payouts = recompute(snap)
     for p in problems: print("FAIL", p); ok = False
     if not problems: print(f"OK draw and split reproduce {len(payouts)} payouts from the committed registry state")
-    missing = [(addr, sats) for addr, sats in payouts if outs.get(addr) != sats]
+    missing = [(addr, sats) for addr, sats in payouts if outs.get(addr_to_spk(addr)) != sats]
     if missing:
-        for addr, sats in missing: print(f"FAIL coinbase does not pay {addr} exactly {sats} sats (got {outs.get(addr)})"); ok = False
+        for addr, sats in missing: print(f"FAIL coinbase does not pay {addr} exactly {sats} sats (got {outs.get(addr_to_spk(addr))})"); ok = False
     else:
         print(f"OK every payout is in the coinbase with the exact amount (pool leftover {snap['pool_total']} sats)")
+    if int(snap.get("v", 1)) >= 2 and snap.get("supplier"):
+        got = outs.get(addr_to_spk(snap["supplier"]))
+        if got != int(snap["supplier_sats"]):
+            print(f"FAIL coinbase does not pay template supplier {snap['supplier']} exactly {snap['supplier_sats']} sats (got {got})"); ok = False
+        else:
+            print(f"OK template supplier {snap['supplier']} paid {snap['supplier_sats']} sats ({snap['supplier_bps']} bps of the coinbase)")
     print("VERIFIED" if ok else "MISMATCH")
     return 0 if ok else 1
 

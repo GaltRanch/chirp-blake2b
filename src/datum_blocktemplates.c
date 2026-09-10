@@ -36,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <stdbool.h>
@@ -517,6 +518,321 @@ T_DATUM_TEMPLATE_DATA *datum_gbt_parser(json_t *gbt) {
 	return tdata;
 }
 
+static uint64_t datum_json_u64(json_t *v) {
+	if (json_is_integer(v)) return (uint64_t)json_integer_value(v);
+	if (json_is_string(v)) return strtoull(json_string_value(v), NULL, 10);
+	return 0;
+}
+
+extern char g_carousel_supplier[128];   // datum_coinbaser.c: supplier sorteado del ciclo
+extern char g_carousel_supplier_name[40]; // datum_coinbaser.c: nombre del supplier ("name" del JSON) → scriptSig
+
+// Copia el "name" del template JSON del supplier a g_carousel_supplier_name, sanitizado a ASCII imprimible
+// (viene del header X-PyBLOCK-Name del join — no confiable). Vacío/ausente → queda "", el scriptSig no lo incluye.
+static void datum_template_set_supplier_name(json_t *sup) {
+	const char *nm = sup ? json_string_value(json_object_get(sup, "name")) : NULL;
+	int w = 0;
+	if (nm) {
+		for (int z = 0; nm[z] && w < (int)sizeof(g_carousel_supplier_name) - 1; z++) {
+			if (nm[z] >= 0x20 && nm[z] <= 0x7e) g_carousel_supplier_name[w++] = nm[z];
+		}
+	}
+	g_carousel_supplier_name[w] = 0;
+}
+
+// Aplica el tx-set de un supplier YA CARGADO (sup) sobre res_val (GBT de nuestro nodo). our_ph = prevhash nuestro.
+// Conserva el envelope consensus blake2b nuestro; solo si el supplier apunta al mismo tip. wtxid no consensus en solo.
+// Devuelve true si aplicó (prevhash coincide + tiene transactions[]).
+static bool datum_template_swap_from(json_t *res_val, json_t *sup, const char *our_ph, const char *sup_addr) {
+	json_t *sup_txs, *our_txs, *new_txs, *tx;
+	const char *sup_ph, *sup_wc, *txid, *data;
+	uint64_t our_cbv, our_fees = 0, subsidy, sup_fees = 0, fee, wt;
+	size_t k;
+
+	sup_ph = json_string_value(json_object_get(sup, "previousblockhash"));
+	if (!our_ph || !sup_ph || strcmp(our_ph, sup_ph)) return false;
+	sup_txs = json_object_get(sup, "transactions");
+	if (!json_is_array(sup_txs)) return false;
+
+	our_cbv = datum_json_u64(json_object_get(res_val, "coinbasevalue"));
+	our_txs = json_object_get(res_val, "transactions");
+	if (json_is_array(our_txs)) {
+		json_array_foreach(our_txs, k, tx) our_fees += datum_json_u64(json_object_get(tx, "fee"));
+	}
+	subsidy = (our_cbv >= our_fees) ? (our_cbv - our_fees) : our_cbv;
+
+	new_txs = json_array();
+	json_array_foreach(sup_txs, k, tx) {
+		txid = json_string_value(json_object_get(tx, "txid"));
+		data = json_string_value(json_object_get(tx, "data"));
+		if (!txid || !data) continue;
+		fee = datum_json_u64(json_object_get(tx, "fee"));
+		wt  = datum_json_u64(json_object_get(tx, "weight"));
+		sup_fees += fee;
+		json_t *nt = json_object();
+		json_object_set_new(nt, "data",   json_string(data));
+		json_object_set_new(nt, "txid",   json_string(txid));
+		json_object_set_new(nt, "hash",   json_string(txid));   // solo: wtxid no consensus
+		json_object_set_new(nt, "fee",    json_integer((json_int_t)fee));
+		json_object_set_new(nt, "weight", json_integer((json_int_t)wt));
+		json_object_set_new(nt, "sigops", json_integer(0));
+		json_array_append_new(new_txs, nt);
+	}
+
+	sup_wc = json_string_value(json_object_get(sup, "default_witness_commitment"));
+	if (sup_wc) json_object_set_new(res_val, "default_witness_commitment", json_string(sup_wc));
+	json_object_set_new(res_val, "coinbasevalue", json_integer((json_int_t)(subsidy + sup_fees)));
+	json_object_set_new(res_val, "transactions", new_txs);
+
+	DLOG_INFO("template: swap OK supplier=%s ntx=%zu subsidy=%"PRIu64" sup_fees=%"PRIu64" cbv=%"PRIu64,
+		sup_addr, json_array_size(new_txs), subsidy, sup_fees, subsidy + sup_fees);
+	return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Carousel — DETERMINISTIC rotation (replaces the old rand() shuffle). Selection neutrality is
+// enforced by construction and recomputable by anyone from public data:
+//   set     = supplier addresses whose cached template is fresh (previousblockhash == our tip),
+//             sorted bytewise ascending (filename minus .json = payout address)
+//   seed    = BLAKE2b-256(prevhash as lowercase hex ASCII)
+//   start   = stride>0 ? (height*stride)%n (continuous) : uint64_be(BLAKE2b-256(prevhash)[0..8])%n (legacy; carousel_block_stride)
+//   cycle   = work cycles since this prevhash was first seen by this gateway (0-based, ~every
+//             work_update_seconds)
+//   pick    = set[(start + cycle + skipped) % n]   (skipped = scheduled templates that failed to
+//             load/apply this cycle, tried in schedule order)
+// Every valid supplier is served exactly once per n cycles (round-robin), in an order fixed by the
+// previous block hash. Each cycle is logged ("carousel: rotation ...", the set whenever it changes)
+// and exposed live on the API (/carousel). The served job carries pick's payout output + name in the
+// coinbase, so a supplier can measure its own serve-rate straight from the stratum.
+// ---------------------------------------------------------------------------------------------
+T_CAROUSEL_ROTATION g_carousel_rot = { .lock = PTHREAD_MUTEX_INITIALIZER };
+
+static int carousel_cmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
+
+// Membership test for the fresh set — FULL JSON parse, same rule the public verifier applies
+// (tools/verify_carousel_rotation.py --template-dir): previousblockhash == our tip, a transactions[] array,
+// not flagged stale by the ingest and — unless template_require_validated=false — carrying the ingest's
+// validation stamp (validated.proposal == true: passed getblocktemplate mode=proposal + the datacarrier gate).
+// No header prefilter: the set must be a pure function of the files' content.
+static bool carousel_cache_fresh(const char *path, const char *our_ph) {
+	json_error_t err;
+	json_t *sup = json_load_file(path, 0, &err), *v;
+	const char *ph;
+	bool ok = false;
+	if (!sup) return false;
+	ph = json_string_value(json_object_get(sup, "previousblockhash"));
+	ok = ph && !strcmp(ph, our_ph) && json_is_array(json_object_get(sup, "transactions"))
+	     && !json_is_true(json_object_get(sup, "stale"));
+	if (ok && datum_config.mining_template_require_validated) {
+		v = json_object_get(sup, "validated");
+		ok = json_is_object(v) && json_is_true(json_object_get(v, "proposal"));
+	}
+	json_decref(sup);
+	return ok;
+}
+
+static void carousel_rot_publish(const char *our_ph, uint64_t height, uint32_t cycle, int n, int start, int idx, bool failed, const char *pick, const char *set_hash, char names[][128]) {
+	int i;
+	pthread_mutex_lock(&g_carousel_rot.lock);
+	strncpy(g_carousel_rot.prevhash, our_ph, sizeof(g_carousel_rot.prevhash) - 1);
+	g_carousel_rot.prevhash[sizeof(g_carousel_rot.prevhash) - 1] = 0;
+	g_carousel_rot.height = height;
+	g_carousel_rot.cycle = cycle;
+	g_carousel_rot.n = n;
+	g_carousel_rot.start = start;
+	g_carousel_rot.idx = idx;
+	g_carousel_rot.skipped = 0;
+	g_carousel_rot.failed = failed;
+	strncpy(g_carousel_rot.pick, pick ? pick : "", sizeof(g_carousel_rot.pick) - 1);
+	g_carousel_rot.pick[sizeof(g_carousel_rot.pick) - 1] = 0;
+	strncpy(g_carousel_rot.set_hash, set_hash ? set_hash : "", sizeof(g_carousel_rot.set_hash) - 1);
+	g_carousel_rot.set_hash[sizeof(g_carousel_rot.set_hash) - 1] = 0;
+	g_carousel_rot.set_n = n;
+	for (i = 0; i < n; i++) { strncpy(g_carousel_rot.set[i], names[i], 127); g_carousel_rot.set[i][127] = 0; }
+	g_carousel_rot.updated = (uint64_t)time(NULL);
+	pthread_mutex_unlock(&g_carousel_rot.lock);
+}
+
+// Template mode (BLAKE2b): inyecta el tx-set del supplier. Single = template_file/config addr.
+// Carousel = rotación DETERMINISTA (prevhash-seeded round-robin) sobre los suppliers frescos de template_dir;
+// paga a ESE supplier (g_carousel_supplier). Ver el bloque de comentarios de arriba.
+static void datum_template_apply_supplier(json_t *res_val) {
+	json_error_t err;
+	const char *our_ph;
+	json_t *sup;
+
+	if (!datum_config.mining_blake2b_template || !res_val) return;
+	our_ph = json_string_value(json_object_get(res_val, "previousblockhash"));
+	if (!our_ph) return;
+
+	// Activación por altura de TEMPLATE (swap anunciado, p.ej. LOTTO→Carousel @970000): por debajo de la
+	// altura el gateway no inyecta nada (tx-set propio, coinbase plano = LOTTO exacto). Al llegar, cambia el
+	// tag primario del coinbase (una vez) y sigue en modo template. Sin restart, sin carrera con el bloque.
+	if (datum_config.mining_template_activate_height > 0) {
+		static uint64_t pre_logged_h = 0;
+		static bool activated = false;
+		uint64_t th = datum_json_u64(json_object_get(res_val, "height"));
+		if (th < (uint64_t)datum_config.mining_template_activate_height) {
+			if (pre_logged_h != th) {
+				pre_logged_h = th;
+				DLOG_INFO("template: PRE-ACTIVATION h=%"PRIu64" < %d — tx-set propio, coinbase plano (LOTTO)", th, datum_config.mining_template_activate_height);
+			}
+			g_carousel_supplier[0] = 0;
+			g_carousel_supplier_name[0] = 0;
+			pthread_mutex_lock(&g_carousel_rot.lock);
+			g_carousel_rot.active = false;
+			g_carousel_rot.activate_height = (uint64_t)datum_config.mining_template_activate_height;
+			g_carousel_rot.height = th;
+			g_carousel_rot.n = 0; g_carousel_rot.set_n = 0; g_carousel_rot.idx = -1; g_carousel_rot.pick[0] = 0;
+			g_carousel_rot.updated = (uint64_t)time(NULL);
+			pthread_mutex_unlock(&g_carousel_rot.lock);
+			return;
+		}
+		if (!activated) {
+			activated = true;
+			if (datum_config.mining_template_activate_tag[0]) {
+				char newtag[sizeof(datum_config.mining_coinbase_tag_primary)];
+				strncpy(newtag, datum_config.mining_template_activate_tag, sizeof(newtag) - 1);
+				newtag[sizeof(newtag) - 1] = 0;
+				memcpy(datum_config.mining_coinbase_tag_primary, newtag, sizeof(newtag));
+			}
+			DLOG_INFO("template: *** ACTIVATED at template height %"PRIu64" (>= %d) — template/carousel mode ON, coinbase tag \"%s\" ***",
+				th, datum_config.mining_template_activate_height, datum_config.mining_coinbase_tag_primary);
+			pthread_mutex_lock(&g_carousel_rot.lock);
+			g_carousel_rot.active = true;
+			g_carousel_rot.activate_height = (uint64_t)datum_config.mining_template_activate_height;
+			pthread_mutex_unlock(&g_carousel_rot.lock);
+		}
+	} else {
+		pthread_mutex_lock(&g_carousel_rot.lock);
+		g_carousel_rot.active = true;
+		pthread_mutex_unlock(&g_carousel_rot.lock);
+	}
+
+	if (datum_config.mining_blake2b_template_carousel && datum_config.mining_template_dir[0]) {
+		static char cr_prev[80] = "";
+		static uint32_t cr_cycle = 0;
+		static char cr_set_hash[17] = "";
+		static char names[CAROUSEL_MAX_SET][128];
+		static char setbuf[CAROUSEL_MAX_SET * 129];
+		unsigned char h[32];
+		char set_hash[17], path[640];
+		uint64_t height = datum_json_u64(json_object_get(res_val, "height")), s = 0;
+		size_t sl = 0;
+		int n = 0, i, start, idx = -1;
+		bool applied = false;
+		struct dirent *de;
+		DIR *d;
+
+		// cycle counter: restarts at 0 on every new prevhash
+		if (strcmp(cr_prev, our_ph)) {
+			strncpy(cr_prev, our_ph, sizeof(cr_prev) - 1); cr_prev[sizeof(cr_prev) - 1] = 0;
+			cr_cycle = 0;
+			cr_set_hash[0] = 0;
+			pthread_mutex_lock(&g_carousel_rot.lock);
+			g_carousel_rot.n_prev_block = g_carousel_rot.n;   // baseline: how many suppliers the previous block ended with
+			pthread_mutex_unlock(&g_carousel_rot.lock);
+		} else {
+			cr_cycle++;
+		}
+
+		d = opendir(datum_config.mining_template_dir);
+		if (!d) { DLOG_WARN("carousel: no pude abrir %s", datum_config.mining_template_dir); g_carousel_supplier[0] = 0; g_carousel_supplier_name[0] = 0; return; }
+		// Collect EVERY fresh cache (full parse), then sort; the cap applies after sorting (see CAROUSEL_MAX_SET).
+		while ((de = readdir(d)) && n < CAROUSEL_MAX_SET) {
+			size_t l = strlen(de->d_name), al;
+			if (!(l > 5 && l <= 132 && !strcmp(de->d_name + l - 5, ".json"))) continue;
+			snprintf(path, sizeof(path), "%s/%s", datum_config.mining_template_dir, de->d_name);
+			if (!carousel_cache_fresh(path, our_ph)) continue;
+			al = l - 5; if (al > 127) al = 127;
+			memcpy(names[n], de->d_name, al); names[n][al] = 0;   // filename sin .json = supplier addr
+			n++;
+		}
+		closedir(d);
+		if (n == 0) {
+			DLOG_WARN("carousel: ningún supplier fresco (prevhash %s) — uso tx-set propio", our_ph);
+			g_carousel_supplier[0] = 0;   // sin supplier → build_user_coinbase no agrega output supplier
+			g_carousel_supplier_name[0] = 0;
+			carousel_rot_publish(our_ph, height, cr_cycle, 0, 0, -1, false, "", "", names);
+			return;
+		}
+		qsort(names, n, sizeof(names[0]), carousel_cmp);
+
+		// set hash = id of this cycle's fresh set; the full set is logged whenever it changes
+		for (i = 0; i < n; i++) { size_t al = strlen(names[i]); memcpy(setbuf + sl, names[i], al); sl += al; setbuf[sl++] = '\n'; }
+		datum_blake2b_256(h, (const unsigned char *)setbuf, sl);
+		snprintf(set_hash, sizeof(set_hash), "%02x%02x%02x%02x%02x%02x%02x%02x", h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
+		if (strcmp(set_hash, cr_set_hash)) {
+			strcpy(cr_set_hash, set_hash);
+			for (i = 0; i < n; i += 16) {   // logger caps a line at 1023 chars → 16 addresses per line
+				char line[900];
+				size_t ll = 0;
+				int j, last = (i + 16 < n) ? i + 16 : n;
+				for (j = i; j < last; j++) {
+					int w = snprintf(line + ll, sizeof(line) - ll, "%s%s", j > i ? "," : "", names[j]);
+					if (w < 0 || ll + (size_t)w >= sizeof(line)) break;
+					ll += (size_t)w;
+				}
+				DLOG_INFO("carousel: set %s n=%d [%d..%d] %s", set_hash, n, i, last - 1, line);
+			}
+		}
+
+		// start del ciclo. Dos modos deterministas y reproducibles desde datos on-chain:
+		//   stride>0 (continuo): start = (height * stride) mod n → el punto de inicio AVANZA por bloque.
+		//   stride==0 (legacy): start = uint64_be(BLAKE2b-256(prevhash)[0..8]) mod n.
+		if (datum_config.mining_carousel_block_stride > 0) {
+			start = (int)(((uint64_t)height * (uint64_t)datum_config.mining_carousel_block_stride) % (uint64_t)n);
+		} else {
+			datum_blake2b_256(h, (const unsigned char *)our_ph, strlen(our_ph));
+			for (i = 0; i < 8; i++) s = (s << 8) | h[i];
+			start = (int)(s % (uint64_t)n);
+		}
+
+		// The schedule is NEVER advanced past a failing template: pick = set[(start + cycle) % n], full stop.
+		// If that template fails to load/apply, this cycle mines the gateway's own tx-set with NO supplier
+		// output (visible on-chain and in the API as failed=true) — the operator has no knob to skip anyone.
+		idx = (int)(((uint64_t)start + (uint64_t)cr_cycle) % (uint64_t)n);
+		snprintf(path, sizeof(path), "%s/%s.json", datum_config.mining_template_dir, names[idx]);
+		sup = json_load_file(path, 0, &err);
+		if (sup && datum_template_swap_from(res_val, sup, our_ph, names[idx])) {
+			pthread_mutex_lock(&g_carousel_rot.lock);
+			strncpy(g_carousel_supplier, names[idx], sizeof(g_carousel_supplier) - 1);
+			g_carousel_supplier[127] = 0;
+			datum_template_set_supplier_name(sup);   // nombre → scriptSig del job
+			pthread_mutex_unlock(&g_carousel_rot.lock);
+			applied = true;
+		}
+		if (sup) json_decref(sup);
+		if (!applied) {
+			DLOG_WARN("carousel: rotation h=%"PRIu64" cycle=%u n=%d start=%d idx=%d pick=%s FAILED to load/apply — tx-set propio, sin supplier este ciclo",
+				height, cr_cycle, n, start, idx, names[idx]);
+			pthread_mutex_lock(&g_carousel_rot.lock);
+			g_carousel_supplier[0] = 0;
+			g_carousel_supplier_name[0] = 0;
+			pthread_mutex_unlock(&g_carousel_rot.lock);
+			carousel_rot_publish(our_ph, height, cr_cycle, n, start, idx, true, "", set_hash, names);
+			return;
+		}
+		DLOG_INFO("carousel: rotation h=%"PRIu64" cycle=%u n=%d start=%d skipped=0 idx=%d pick=%s set=%s prevhash=%s",
+			height, cr_cycle, n, start, idx, names[idx], set_hash, our_ph);
+		carousel_rot_publish(our_ph, height, cr_cycle, n, start, idx, false, names[idx], set_hash, names);
+		return;
+	}
+
+	// modo single
+	if (!datum_config.mining_template_file[0]) return;
+	sup = json_load_file(datum_config.mining_template_file, 0, &err);
+	if (!sup) { DLOG_WARN("template: no pude leer %s (%s) — uso tx-set propio", datum_config.mining_template_file, err.text); g_carousel_supplier_name[0] = 0; return; }
+	datum_template_set_supplier_name(sup);   // per-supplier stratum: su nombre también va al scriptSig
+	if (!g_carousel_supplier_name[0] && datum_config.mining_template_supplier_address[0]) {
+		// supplier sin "name" → prefijo del address (mismo largo que el viejo tag -PREFIX de gen_b2b_config.sh)
+		snprintf(g_carousel_supplier_name, sizeof(g_carousel_supplier_name), "%.8s", datum_config.mining_template_supplier_address);
+	}
+	if (!datum_template_swap_from(res_val, sup, our_ph, datum_config.mining_template_supplier_address))
+		DLOG_WARN("template: supplier stale/invalid — uso tx-set propio");
+	json_decref(sup);
+}
+
 void *datum_gateway_fallback_notifier(void *args) {
 	CURL *tcurl = NULL;
 	char req[512];
@@ -558,7 +874,7 @@ void *datum_gateway_fallback_notifier(void *args) {
 			json_decref(gbbh);
 			gbbh = NULL;
 		}
-		sleep(1);
+		sleep(datum_config.bitcoind_notify_poll_seconds > 0 ? datum_config.bitcoind_notify_poll_seconds : 1);
 	}
 }
 
@@ -632,6 +948,7 @@ void *datum_gateway_template_thread(void *args) {
 				datum_blocktemplates_error = "Could not decode GBT result!";
 				DLOG_ERROR("%s", datum_blocktemplates_error);
 			} else {
+				datum_template_apply_supplier(res_val);   // template mode: inyecta el tx-set del supplier
 				DLOG_DEBUG("DEBUG: calling datum_gbt_parser (new=%d)", was_notified?1:0);
 				t = datum_gbt_parser(res_val);
 				
@@ -745,7 +1062,22 @@ void *datum_gateway_template_thread(void *args) {
 		gbt = NULL;
 		
 		if ((!was_notified) || (new_notify || new_notify_threadsafe)) {
-			for(i=0;i<(((uint64_t)datum_config.bitcoind_work_update_seconds*(uint64_t)1000000)/(uint64_t)2500);i++) {
+			uint64_t wait_us = (uint64_t)datum_config.bitcoind_work_update_seconds * (uint64_t)1000000;
+			// Carousel fast re-cycle: right after a block the fresh set is thin (suppliers publish for the new tip
+			// within seconds). While it is empty or below half of the previous block's set, cycle again sooner so
+			// miners spend seconds, not a full work cycle, on the pool's own tx-set / the single fastest supplier.
+			if (datum_config.mining_blake2b_template_carousel && datum_config.mining_template_fast_recycle_ms > 0
+			    && (current_time_millis() - last_block_change) < 30000) {
+				int n, nprev; bool act;
+				pthread_mutex_lock(&g_carousel_rot.lock);
+				n = g_carousel_rot.n; nprev = g_carousel_rot.n_prev_block; act = g_carousel_rot.active;
+				pthread_mutex_unlock(&g_carousel_rot.lock);
+				if (act && (n == 0 || (nprev >= 2 && n < nprev / 2))) {
+					wait_us = (uint64_t)datum_config.mining_template_fast_recycle_ms * 1000ULL;
+					DLOG_INFO("carousel: fresh set thin (n=%d, prev block n=%d) — fast re-cycle in %d ms", n, nprev, datum_config.mining_template_fast_recycle_ms);
+				}
+			}
+			for(i=0;i<(wait_us/(uint64_t)2500);i++) {
 				usleep(2500);
 				if (new_notify || new_notify_threadsafe) {
 					new_notify = 0;

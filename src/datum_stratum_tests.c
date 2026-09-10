@@ -690,7 +690,7 @@ void datum_stratum_mod_username_tests() {
 
 static void datum_blake2b_headline_coinbase_tests(void) {
 	/* Fix PyBLOCK: en el bloque de activacion (headline en el GBT) el coinbase scriptSig DEBE contener el headline (PR#359 bad-headline). */
-	extern int generate_coinbase_input(int height, char *cb, int *target_pot_index, const T_DATUM_TEMPLATE_DATA *tmpl);
+	extern int generate_coinbase_input(int height, char *cb, int *target_pot_index, const T_DATUM_TEMPLATE_DATA *tmpl, const char *sup_name);
 	T_DATUM_TEMPLATE_DATA tdata;
 	char cb[512], low[512], hlhex[128] = {0};
 	int tpi = 0, z;
@@ -704,7 +704,7 @@ static void datum_blake2b_headline_coinbase_tests(void) {
 	memcpy(tdata.blake2b_headline, hl, hllen);
 	tdata.blake2b_headline_len = (uint8_t)hllen;
 	memset(cb, 0, sizeof(cb));
-	generate_coinbase_input(800000, cb, &tpi, &tdata);
+	generate_coinbase_input(800000, cb, &tpi, &tdata, NULL);
 	for (z = 0; cb[z]; z++) low[z] = (cb[z] >= 'A' && cb[z] <= 'F') ? cb[z] + 32 : cb[z];
 	low[z] = 0;
 	datum_test(strstr(low, hlhex) != NULL);
@@ -714,7 +714,7 @@ static void datum_blake2b_headline_coinbase_tests(void) {
 	tdata.header_version = 2;
 	tdata.blake2b_headline_len = 0;
 	memset(cb, 0, sizeof(cb));
-	generate_coinbase_input(800000, cb, &tpi, &tdata);
+	generate_coinbase_input(800000, cb, &tpi, &tdata, NULL);
 	for (z = 0; cb[z]; z++) low[z] = (cb[z] >= 'A' && cb[z] <= 'F') ? cb[z] + 32 : cb[z];
 	low[z] = 0;
 	datum_test(strstr(low, hlhex) == NULL);
@@ -725,7 +725,7 @@ static void datum_blake2b_headline_coinbase_tests(void) {
 	memcpy(tdata.blake2b_headline, hl, hllen);
 	tdata.blake2b_headline_len = (uint8_t)hllen;
 	memset(cb, 0, sizeof(cb));
-	generate_coinbase_input(800000, cb, &tpi, &tdata);
+	generate_coinbase_input(800000, cb, &tpi, &tdata, NULL);
 	for (z = 0; cb[z]; z++) low[z] = (cb[z] >= 'A' && cb[z] <= 'F') ? cb[z] + 32 : cb[z];
 	low[z] = 0;
 	datum_test(strstr(low, hlhex) == NULL);

@@ -78,6 +78,8 @@ const T_DATUM_CONFIG_ITEM datum_config_options[] = {
 	{ .var_type = DATUM_CONF_BOOL,	 	.category = "bitcoind", 	.name = "notify_fallback",			.description = "Fall back to less efficient methods for new block notifications. Can disable if you use blocknotify.",
 		.example_default = true,
 		.required = false, .ptr = &datum_config.bitcoind_notify_fallback, .default_bool = true },
+	{ .var_type = DATUM_CONF_INT,	 	.category = "bitcoind", 	.name = "notify_poll_seconds",		.description = "Seconds between getbestblockhash polls of the fallback notifier (1 = upstream). Raise it when an external notifier hits /NOTIFY on every block, so N gateways stop costing N RPC/s on the node.",
+		.required = false, .ptr = &datum_config.bitcoind_notify_poll_seconds, .default_int = 1 },
 	
 	// stratum v1 server configs
 	{ .var_type = DATUM_CONF_STRING, 	.category = "stratum", 		.name = "listen_addr",					.description = "IP address to listen for Stratum Gateway connections",
@@ -129,12 +131,40 @@ const T_DATUM_CONFIG_ITEM datum_config_options[] = {
 		.required = false, .ptr = datum_config.mining_save_submitblocks_dir,			.default_string[0] = "", .max_string_len = sizeof(datum_config.mining_save_submitblocks_dir) },
 	{ .var_type = DATUM_CONF_BOOL, 		.category = "mining", 		.name = "allow_hasher_time_rolling",	.description = "Allow hasher time rolling for BLAKE2b jobs",
 		.required = false, .ptr = &datum_config.mining_allow_hasher_time_rolling, 		.default_bool = false },
-	{ .var_type = DATUM_CONF_BOOL, 		.category = "mining", 		.name = "blake2b_chirp",	.description = "CHIRP BLAKE2b: shared coinbase = weighted-lottery split (whitepaper). Requires solo mode + pow_algorithm=blake2b.",
-		.required = false, .ptr = &datum_config.mining_blake2b_chirp, 		.default_bool = false },
 	{ .var_type = DATUM_CONF_STRING, 	.category = "mining", 		.name = "pow_algorithm",			.description = "PoW algorithm: auto (follow GBT), blake2b (Knots header v2 / Antminer A3), or sha256d",
 		.example_default = true,
 		.required = false, .ptr = datum_config.mining_pow_algorithm,				.default_string[0] = "auto", .max_string_len = sizeof(datum_config.mining_pow_algorithm) },
-	
+	{ .var_type = DATUM_CONF_BOOL, 		.category = "mining", 		.name = "blake2b_personal_lotto",	.description = "Personal-lotto (BLAKE2b solo): each miner mines to their OWN address (from their stratum username), PyBLOCK keeps a 0.9% coinbase fee. Requires pow_algorithm=blake2b and solo mode.",
+		.required = false, .ptr = &datum_config.mining_blake2b_personal_lotto, 		.default_bool = false },
+	{ .var_type = DATUM_CONF_BOOL, 		.category = "mining", 		.name = "blake2b_template",	.description = "Template mode (BLAKE2b solo): mine the supplier's cached template (their tx selection); coinbase splits discoverer 98% / supplier 1% / pool 1%. Requires blake2b_personal_lotto=true.",
+		.required = false, .ptr = &datum_config.mining_blake2b_template, 		.default_bool = false },
+	{ .var_type = DATUM_CONF_STRING, 	.category = "mining", 		.name = "template_file",	.description = "Path to the supplier's cached GBT JSON (data/template_live/<addr>.json). Used when blake2b_template=true.",
+		.required = false, .ptr = datum_config.mining_template_file,		.default_string[0] = "", .max_string_len = sizeof(datum_config.mining_template_file) },
+	{ .var_type = DATUM_CONF_STRING, 	.category = "mining", 		.name = "template_supplier_address",	.description = "Supplier BTC address receiving the supplier share (1%) when blake2b_template=true.",
+		.required = false, .ptr = datum_config.mining_template_supplier_address,		.default_string[0] = "", .max_string_len = sizeof(datum_config.mining_template_supplier_address) },
+	{ .var_type = DATUM_CONF_INT, 		.category = "mining", 		.name = "template_supplier_bps",	.description = "Supplier share in basis points (default 300 = 3%, the bootstrap split). supplier_bps + pool_bps must be < 10000.",
+		.required = false, .ptr = &datum_config.mining_template_supplier_bps, 		.default_int = 300 },
+	{ .var_type = DATUM_CONF_INT, 		.category = "mining", 		.name = "template_pool_bps",	.description = "Pool fee share in basis points (default 100 = 1%). supplier_bps + pool_bps must be < 10000.",
+		.required = false, .ptr = &datum_config.mining_template_pool_bps, 		.default_int = 100 },
+	{ .var_type = DATUM_CONF_BOOL, 		.category = "mining", 		.name = "template_require_validated",	.description = "Only serve supplier templates whose cache file carries the ingest's validation stamp (validated.proposal == true, i.e. the template passed getblocktemplate mode=proposal + the datacarrier gate) and is not flagged stale. Default true. Set false only for testing.",
+		.required = false, .ptr = &datum_config.mining_template_require_validated, 	.default_bool = true },
+	{ .var_type = DATUM_CONF_INT, 		.category = "mining", 		.name = "template_activate_height",	.description = "Template/Carousel mode activates when the block template height reaches this value (0 = active from start). Below it the gateway mines its own tx-set with the plain coinbase (LOTTO), so the switch is atomic on-chain and needs no restart.",
+		.required = false, .ptr = &datum_config.mining_template_activate_height, 	.default_int = 0 },
+	{ .var_type = DATUM_CONF_INT, 		.category = "mining", 		.name = "carousel_block_stride",	.description = "Carousel: how far the rotation start advances per block (start = height*stride mod n; continuous). 0 = legacy (BLAKE2b(prevhash) mod n).",
+		.required = false, .ptr = &datum_config.mining_carousel_block_stride, 	.default_int = 0 },
+	{ .var_type = DATUM_CONF_STRING, 	.category = "mining", 		.name = "template_activate_tag",	.description = "Primary coinbase tag to switch to at template_activate_height (empty = keep coinbase_tag_primary).",
+		.required = false, .ptr = datum_config.mining_template_activate_tag,	.default_string[0] = "", .max_string_len = sizeof(datum_config.mining_template_activate_tag) },
+	{ .var_type = DATUM_CONF_INT, 		.category = "mining", 		.name = "template_fast_recycle_ms",	.description = "Carousel: right after a new block the fresh supplier set is still thin (suppliers publish for the new tip within seconds). While it is empty or below half of the previous block's set, the next work cycle comes after this many ms instead of work_update_seconds (default 5000, 0 = off).",
+		.required = false, .ptr = &datum_config.mining_template_fast_recycle_ms, 	.default_int = 5000 },
+	{ .var_type = DATUM_CONF_BOOL, 		.category = "mining", 		.name = "blake2b_chirp",	.description = "CHIRP: shared coinbase = whitepaper weighted-lottery split among eligible syndicate members (tenure + 24h work), committed with a registry snapshot in OP_RETURN. Solo mode + header v2 only. Works together with blake2b_template/blake2b_template_carousel (the syndicate then mines supplier templates and the supplier earns template_supplier_bps).",
+		.required = false, .ptr = &datum_config.mining_blake2b_chirp, 		.default_bool = false },
+	{ .var_type = DATUM_CONF_INT, 		.category = "mining", 		.name = "chirp_fee_bps",	.description = "CHIRP pool fee in basis points of the coinbase (default 90 = 0.9%). chirp_fee_bps + template_supplier_bps must be < 10000.",
+		.required = false, .ptr = &datum_config.mining_chirp_fee_bps, 		.default_int = 90 },
+	{ .var_type = DATUM_CONF_BOOL, 		.category = "mining", 		.name = "blake2b_template_carousel",	.description = "Carousel mode: each work cycle serve the next fresh supplier template from template_dir in a deterministic round-robin seeded by the previous block hash (see /carousel on the API) and pay THAT supplier template_supplier_bps. Requires blake2b_template=true.",
+		.required = false, .ptr = &datum_config.mining_blake2b_template_carousel, 		.default_bool = false },
+	{ .var_type = DATUM_CONF_STRING, 	.category = "mining", 		.name = "template_dir",	.description = "Directory of supplier cache JSONs (data/template_live/) rotated by the Carousel. Filename (minus .json) = supplier payout address.",
+		.required = false, .ptr = datum_config.mining_template_dir,		.default_string[0] = "", .max_string_len = sizeof(datum_config.mining_template_dir) },
+
 	// API/dashboard
 	{ .var_type = DATUM_CONF_STRING, 	.category = "api",	 		.name = "admin_password",			.description = "API password for actions/changes (username 'admin'; disabled if blank)",
 		.example = "\"\"",
@@ -621,6 +651,30 @@ int datum_read_config(const char *conffile) {
 		return 0;
 	}
 	
+	// Template/Carousel split: supplier_bps + pool_bps must leave something for the finder. Without this
+	// clamp an operator typo (e.g. 3000 instead of 300) silently underflows the finder's uint64 value
+	// and every block built in template mode is invalid (review 2026-09-05).
+	if (datum_config.mining_template_supplier_bps < 0 || datum_config.mining_template_pool_bps < 0
+	    || datum_config.mining_template_supplier_bps + datum_config.mining_template_pool_bps >= 10000) {
+		DLOG_FATAL("mining.template_supplier_bps (%d) + mining.template_pool_bps (%d) must be in [0, 10000) — the finder must keep a positive share.",
+			datum_config.mining_template_supplier_bps, datum_config.mining_template_pool_bps);
+		return 0;
+	}
+	if (datum_config.mining_chirp_fee_bps < 0 || datum_config.mining_chirp_fee_bps + datum_config.mining_template_supplier_bps >= 10000) {
+		DLOG_FATAL("mining.chirp_fee_bps (%d) + mining.template_supplier_bps (%d) must be in [0, 10000) — the syndicate must keep a positive share.",
+			datum_config.mining_chirp_fee_bps, datum_config.mining_template_supplier_bps);
+		return 0;
+	}
+	if (datum_config.mining_template_fast_recycle_ms > 0 && datum_config.mining_template_fast_recycle_ms < 100) {
+		// the template thread waits in 2.5 ms slices: anything under that would loop getblocktemplate with no sleep
+		DLOG_WARN("mining.template_fast_recycle_ms (%d) too small — clamped to 100 ms", datum_config.mining_template_fast_recycle_ms);
+		datum_config.mining_template_fast_recycle_ms = 100;
+	}
+	if (datum_config.mining_blake2b_chirp && datum_config.mining_blake2b_personal_lotto) {
+		DLOG_FATAL("mining.blake2b_chirp and mining.blake2b_personal_lotto are mutually exclusive (shared coinbase vs per-miner coinbase).");
+		return 0;
+	}
+
 	// Save some multiplication later
 	datum_config.datum_protocol_global_timeout_ms = datum_config.datum_protocol_global_timeout * 1000;
 	

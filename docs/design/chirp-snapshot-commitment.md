@@ -31,6 +31,20 @@ payouts[]    = { addr, sats }
 pool_total
 ```
 
+**v2** (CHIRP × Carousel, `v: 2`) adds:
+
+```
+supplier, supplier_bps, supplier_sats      template supplier of the job and its share of the WHOLE coinbase
+                                           ("" / 0 / 0 when no template was injected)
+split_total = coinbase_value − supplier_sats   what the draw actually splits (fee + winners)
+registry[]  = { addr, active_secs (int), power (int), eligible (bool) }
+                                           the COMPLETE registry the gate ran over — a verifier re-checks
+                                           min_days/min_power and that candidates == eligible members
+```
+
+`CHIRP_SNAPSHOT_COMMIT=0` disables the commitment (no OP_RETURN, classic coinbase) without a rebuild.
+Both follow-ups come from Kilombino's PR #1. See `chirp-carousel.md` for the unified gateway.
+
 The gateway writes the snapshot to `CHIRP_SNAPSHOT_DIR` (`<hash>.json`, 48h buffer) and the pool
 publishes it at `chirp_api.php?mode=snapshot&hash=<hash>`; snapshots referenced by found blocks are
 archived permanently.

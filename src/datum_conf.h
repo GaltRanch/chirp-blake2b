@@ -104,6 +104,7 @@ typedef struct {
 	char bitcoind_rpcurl[256];
 	int bitcoind_work_update_seconds;
 	bool bitcoind_notify_fallback;
+	int bitcoind_notify_poll_seconds;   // fallback poller: seconds between getbestblockhash calls (1 = upstream behaviour)
 	
 	char stratum_v1_listen_addr[128];
 	int stratum_v1_listen_port;
@@ -129,8 +130,22 @@ typedef struct {
 	char mining_coinbase_tag_secondary[64];
 	char mining_save_submitblocks_dir[256];
 	bool mining_allow_hasher_time_rolling;
-	bool mining_blake2b_chirp;   // CHIRP BLAKE2b: coinbase compartido = split ponderado (whitepaper). Requiere solo + header v2.
 	char mining_pow_algorithm[16];
+	bool mining_blake2b_personal_lotto;   // personal-lotto BLAKE2b: cada minero cobra en SU address (username), fee 0.9% a PyBLØCK
+	bool mining_blake2b_template;   // template mode BLAKE2b: mina el tx-set del supplier; coinbase discoverer 98% / supplier 1% / pool 1%. Requiere blake2b_personal_lotto=true.
+	char mining_template_file[256]; // ruta al GBT cacheado del supplier (data/template_live/<addr>.json)
+	char mining_template_supplier_address[256];  // address del supplier (output del 1%) — modo single
+	int mining_template_supplier_bps;  // bps del supplier (default 100 = 1%)
+	int mining_template_pool_bps;      // bps del pool/fee (default 100 = 1%)
+	bool mining_blake2b_template_carousel;  // Carousel: rotación DETERMINISTA (round-robin seeded por prevhash) sobre los suppliers frescos de template_dir; paga a ESE supplier. Requiere blake2b_template=true.
+	char mining_template_dir[256];     // dir de caches de supplier (template_live/) para el Carousel
+	int mining_template_activate_height;    // 0 = template mode activo desde el arranque; H>0 = LOTTO exacto hasta la template de altura H (inclusive activa)
+	int mining_carousel_block_stride;       // Carousel: avance del start por bloque (start=height*stride%n). 0=legacy.
+	char mining_template_activate_tag[256]; // tag primario del coinbase a partir de la activación ("" = no cambiar)
+	int mining_template_fast_recycle_ms;    // Carousel: si tras un bloque el set fresco es chico, próximo ciclo a los N ms (default 5000; 0 = off)
+	bool mining_template_require_validated; // solo servir templates con stamp de validación del ingest (validated.proposal==true, !stale). Default true.
+	bool mining_blake2b_chirp;   // CHIRP: coinbase COMPARTIDA = split ponderado del sindicato (whitepaper). Requiere solo + header v2. Compatible con blake2b_template (CHIRP × Carousel).
+	int  mining_chirp_fee_bps;   // CHIRP: fee del pool en bps sobre la coinbase (default 90 = 0.9 %; CHIRP × Carousel: 100 con supplier 100 → 98/1/1)
 	int coinbase_unique_id;
 	
 	char api_admin_password[72];
