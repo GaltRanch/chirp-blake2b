@@ -126,11 +126,25 @@ size_t chirp_weighted_draw(const chirp_cand_t *cands, size_t nc, uint64_t seed, 
 
 // Split CHIRP: fee_bps del total al pool, resto distribuido ∝ weight entre los ganadores del sorteo.
 // Devuelve payouts (>= MIN_PAYOUT_SATS) y *pool_total = total - Σasignado (fee + dust caído + redondeo).
+// Bytes de un output de pago (8 valor + 1 varint + script): bc1q de 42 chars = P2WPKH (22), bc1q de 62 = P2WSH (34),
+// bc1p = P2TR (34), '1' = P2PKH (25), '3' = P2SH (23). Desconocida → el peor caso (34).
+size_t chirp_output_bytes(const char *addr){
+    size_t l = addr ? strlen(addr) : 0, script = 34;
+    if(l>4 && !strncmp(addr,"bc1q",4)) script = (l<=44) ? 22 : 34;
+    else if(l>4 && !strncmp(addr,"bc1p",4)) script = 34;
+    else if(l>0 && addr[0]=='1') script = 25;
+    else if(l>0 && addr[0]=='3') script = 23;
+    return 9 + script;
+}
+
 size_t chirp_split(const chirp_cand_t *cands, size_t nc, uint64_t total_value, uint16_t fee_bps, uint64_t seed, chirp_payout_t *out, uint64_t *pool_total){
     uint64_t base_fee = (uint64_t)(( (unsigned __int128)total_value * fee_bps) / 10000);
     uint64_t distributable = total_value>base_fee ? total_value-base_fee : 0;
     chirp_cand_t *winners = malloc((nc?nc:1)*sizeof(chirp_cand_t));
     size_t nw = chirp_weighted_draw(cands, nc, seed, CHIRP_MAX_N, winners);
+    // Presupuesto de bytes: los ganadores entran en orden de sorteo hasta llenar la coinbase; los que no entran no
+    // participan del reparto (su peso no cuenta), así el gateway nunca recorta outputs y nada cae al pool por tamaño.
+    { size_t used=0, fit=0; for(size_t i=0;i<nw;i++){ size_t b=chirp_output_bytes(winners[i].addr); if(used+b>CHIRP_OUTPUT_BUDGET_BYTES) break; used+=b; fit++; } nw=fit; }
     double total_w=0; for(size_t i=0;i<nw;i++) total_w+=winners[i].weight;
     if(nw==0 || total_w<=0.0){ free(winners); if(pool_total)*pool_total=total_value; return 0; }
     size_t k=0; uint64_t assigned=0;

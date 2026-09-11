@@ -11,7 +11,11 @@
 #define CHIRP_MIN_POWER        5000000.0
 #define CHIRP_DAYS_FULL        30.0
 #define CHIRP_POWER_FULL       2000000000.0
-#define CHIRP_MAX_N            100
+// Sin tope artificial de ganadores: el único límite es físico. La coinbase BLAKE2b es tipo 4 (16.000 B) y el
+// gateway RECORTA en silencio los outputs que no entran, mandando su valor al pool: para que eso no pase nunca, el
+// split corta ANTES por presupuesto de bytes (2026-09-11, Curly: "no quiero límites, la política de 0 custodia sigue").
+#define CHIRP_MAX_N            490          /* techo del array de outputs del job (512) menos snapshot/supplier */
+#define CHIRP_OUTPUT_BUDGET_BYTES 14800     /* bytes de outputs que caben en la coinbase tipo 4 con margen para tags/extranonce/pool/witness */
 #define CHIRP_FEE_BPS          90
 #define CHIRP_MIN_PAYOUT_SATS  1000ULL
 #define CHIRP_ACTIVE_GAP_CAP   3600u
@@ -40,6 +44,8 @@ size_t chirp_candidates(chirp_registry_t *r, uint64_t now, double min_days, doub
 // tenure activa (días) y trabajo 24h de UN miembro, con la misma poda de ventana que usa el gate — para el snapshot v2
 void   chirp_member_stats(chirp_miner_t *m, uint64_t now, double *days, double *power);
 size_t chirp_weighted_draw(const chirp_cand_t *cands, size_t nc, uint64_t seed, size_t n, chirp_cand_t *out);
+/** Bytes que ocupa un output de pago a esta address (script + valor + varint), estimado por el formato de la address. */
+size_t chirp_output_bytes(const char *addr);
 size_t chirp_split(const chirp_cand_t *cands, size_t nc, uint64_t total_value, uint16_t fee_bps, uint64_t seed, chirp_payout_t *out, uint64_t *pool_total);
 double chirp_u01(uint64_t seed, const char *addr);
 void   chirp_payout_address(const char *user_identity, char *out, size_t outsz);
